@@ -1,0 +1,5 @@
+[
+  "Explain the purpose of blocked attention in one sentence.",
+  "Summarize why KV cache placement matters for decode latency.",
+  "List two reasons why prefill and decode should not share the same first implementation path."
+]

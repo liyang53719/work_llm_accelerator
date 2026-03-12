@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from typing import Any
 
 import torch
@@ -43,25 +44,20 @@ def build_backend(name: str):
     raise ValueError(f"Unsupported backend: {name}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Validate full-model prefill + decode against local Qwen2.5-1.5B.")
-    parser.add_argument("--backend", choices=["torch", "hls-stub"], default="torch")
-    parser.add_argument("--prompt", type=str, default="Explain the purpose of blocked attention in one sentence.")
-    parser.add_argument("--decode-steps", type=int, default=1)
-    parser.add_argument("--atol", type=float, default=1e-4)
-    args = parser.parse_args()
-
-    backend = build_backend(args.backend)
-    if isinstance(backend, HlsBackendStub):
-        raise NotImplementedError("HLS backend is not wired yet. Use --backend torch to validate the framework.")
-
-    tokenizer = backend.tokenizer
-    baseline_model = backend.model
-    input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
+def run_validation(
+    prompt: str,
+    decode_steps: int,
+    atol: float,
+    backend: Any,
+    reference_backend: TorchReferenceBackend,
+) -> dict[str, Any]:
+    tokenizer = reference_backend.tokenizer
+    baseline_model = reference_backend.model
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids
 
     with torch.no_grad():
         baseline_prefill = baseline_model(
-            input_ids=input_ids.to(backend.device),
+            input_ids=input_ids.to(reference_backend.device),
             use_cache=True,
             return_dict=True,
         )
@@ -73,20 +69,24 @@ def main() -> None:
     )
     prefill_cache_diff = cache_diff(snapshot_cache(baseline_prefill.past_key_values), snapshot_cache(backend_prefill.cache))
 
-    print("Prefill logits diff:", prefill_logits_diff)
-    print("Prefill cache diff:", prefill_cache_diff)
+    result = {
+        "prompt": prompt,
+        "prefill_logits_diff": prefill_logits_diff,
+        "prefill_cache_diff": prefill_cache_diff,
+        "decode_steps": [],
+    }
 
-    if prefill_logits_diff["max_abs_diff"] > args.atol or prefill_cache_diff["max_abs_diff"] > args.atol:
+    if prefill_logits_diff["max_abs_diff"] > atol or prefill_cache_diff["max_abs_diff"] > atol:
         raise AssertionError("Prefill validation failed tolerance check.")
 
     baseline_cache = baseline_prefill.past_key_values
     backend_cache = backend_prefill.cache
     next_token = torch.argmax(backend_prefill.logits[:, -1, :], dim=-1, keepdim=True)
 
-    for step_index in range(args.decode_steps):
+    for step_index in range(decode_steps):
         with torch.no_grad():
             baseline_decode = baseline_model(
-                input_ids=next_token.to(backend.device),
+                input_ids=next_token.to(reference_backend.device),
                 past_key_values=baseline_cache,
                 use_cache=True,
                 return_dict=True,
@@ -99,16 +99,49 @@ def main() -> None:
         )
         decode_cache_diff = cache_diff(snapshot_cache(baseline_decode.past_key_values), snapshot_cache(backend_decode.cache))
 
-        print(f"Decode step {step_index} logits diff:", decode_logits_diff)
-        print(f"Decode step {step_index} cache diff:", decode_cache_diff)
+        result["decode_steps"].append(
+            {
+                "step_index": step_index,
+                "logits_diff": decode_logits_diff,
+                "cache_diff": decode_cache_diff,
+            }
+        )
 
-        if decode_logits_diff["max_abs_diff"] > args.atol or decode_cache_diff["max_abs_diff"] > args.atol:
+        if decode_logits_diff["max_abs_diff"] > atol or decode_cache_diff["max_abs_diff"] > atol:
             raise AssertionError(f"Decode validation failed at step {step_index}.")
 
         baseline_cache = baseline_decode.past_key_values
         backend_cache = backend_decode.cache
         next_token = torch.argmax(backend_decode.logits[:, -1, :], dim=-1, keepdim=True)
 
+    return result
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Validate full-model prefill + decode against local Qwen2.5-1.5B.")
+    parser.add_argument("--backend", choices=["torch", "hls-stub"], default="torch")
+    parser.add_argument("--prompt", type=str, default="Explain the purpose of blocked attention in one sentence.")
+    parser.add_argument("--decode-steps", type=int, default=1)
+    parser.add_argument("--atol", type=float, default=1e-4)
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args()
+
+    backend = build_backend(args.backend)
+    reference_backend = backend if isinstance(backend, TorchReferenceBackend) else TorchReferenceBackend(device="cpu")
+    if isinstance(backend, HlsBackendStub):
+        raise NotImplementedError("HLS backend is not wired yet. Use --backend torch to validate the framework.")
+    result = run_validation(args.prompt, args.decode_steps, args.atol, backend, reference_backend)
+
+    if args.json:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        print("Validation PASS")
+        return
+
+    print("Prefill logits diff:", result["prefill_logits_diff"])
+    print("Prefill cache diff:", result["prefill_cache_diff"])
+    for decode_result in result["decode_steps"]:
+        print(f"Decode step {decode_result['step_index']} logits diff:", decode_result["logits_diff"])
+        print(f"Decode step {decode_result['step_index']} cache diff:", decode_result["cache_diff"])
     print("Validation PASS")
 
 
