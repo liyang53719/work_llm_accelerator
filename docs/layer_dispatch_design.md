@@ -53,6 +53,10 @@
 - `hls/common/llm_memory_layout.h`
 - `hls/decode_only/qwen_decode_top_wrapper.h`
 - `hls/decode_only/qwen_decode_top_wrapper.cpp`
+- `hls/prefill_only/qwen_prefill_top_wrapper.h`
+- `hls/prefill_only/qwen_prefill_top_wrapper.cpp`
+- `python/layer_descriptor_builder.py`
+- `verification/validate_layer_dispatch_layout.py`
 
 ## 验证分层
 

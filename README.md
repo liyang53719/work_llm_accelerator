@@ -43,5 +43,6 @@
 - 当前仓库已经具备 layer0 级别的 reference wrapper 与 host 侧验证路径。
 - 这些 reference wrapper 的职责是固定单层数学口径，不是最终 RTL 接口。
 - 下一步实现会切到 `descriptor + DDR/AXI + 1 MB SRAM working-set` 的边界上，避免继续扩展 layer-specific 参数表。
+- decode 和 prefill 都已经有 top-level wrapper 骨架，host 侧也增加了 descriptor/layout 校验脚本，用于锁定多层复用和地址空间口径。
 
 详细计划见 `docs/project_plan.md`。

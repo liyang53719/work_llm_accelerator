@@ -32,6 +32,8 @@
   - 通过 ctypes 调用 C++ layer0 prefill reference wrapper，并直接对照导出的 layer0 输出
 - `validate_decode_layer0_reference_wrapper_math.py`
   - 通过 ctypes 调用 C++ layer0 decode-step reference wrapper，并对照 layer0 输出与 KV cache
+- `validate_layer_dispatch_layout.py`
+  - 校验 decode/prefill 的 all-layer descriptor 生成、DDR 地址布局和 1 MB SRAM 分区口径
 
 ## 当前策略
 
@@ -49,3 +51,4 @@
 - prefill 和 decode 都优先对齐 layer0 子图张量，再逐步扩到更多层和整网闭环。
 - 在把 C++/HLS kernel 做实前，先用 `validate_layer0_prefill_reference_math.py` 把 Python 层的数学规格跑通，避免边实现边猜公式。
 - `layer0_prefill_reference_backend.py` 是当前 prefill layer0 的单一数学规格来源；后续 wrapper 对照和子图验证都应复用它，而不是复制实现。
+- `validate_layer_dispatch_layout.py` 用来锁定 layer 复用和 DDR 地址口径，避免在进入 AXI top-level 之前继续扩 layer-specific 参数接口。
