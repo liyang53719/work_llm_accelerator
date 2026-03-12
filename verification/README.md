@@ -10,6 +10,8 @@
   - 基于本地 `module/qwen_model` 的参考后端
 - `manual_dispatch_backend.py`
   - 复用同一组单层 decoder layer，显式循环 28 层，验证“单层路径 + layer loop”与原生整网 forward 一致
+- `descriptor_dispatch_backend.py`
+  - 在 manual dispatch 基础上显式消费 all-layer descriptor，验证 layer reuse 与地址布局方案能驱动同一组单层 layer 执行
 - `hls_backend_stub.py`
   - 预留给未来 shared library 或 RTL cosim wrapper 的入口
 - `qwen_full_model_validation.py`
@@ -38,6 +40,8 @@
   - 校验 decode/prefill 的 all-layer descriptor 生成、DDR 地址布局和 1 MB SRAM 分区口径
 - `validate_all_layer_manual_dispatch.py`
   - 用手工 28 层 dispatch 路径对照原生 Qwen2.5-1.5B forward，验证层复用方案本身正确
+- `validate_all_layer_descriptor_dispatch.py`
+  - 用 descriptor 驱动的 28 层 dispatch 路径对照原生 Qwen2.5-1.5B forward，验证 descriptor 方案本身正确
 
 ## 当前策略
 
@@ -57,3 +61,4 @@
 - `layer0_prefill_reference_backend.py` 是当前 prefill layer0 的单一数学规格来源；后续 wrapper 对照和子图验证都应复用它，而不是复制实现。
 - `validate_layer_dispatch_layout.py` 用来锁定 layer 复用和 DDR 地址口径，避免在进入 AXI top-level 之前继续扩 layer-specific 参数接口。
 - `manual_dispatch_backend.py` 和 `validate_all_layer_manual_dispatch.py` 用来证明“单层 layer 路径可通过 layer loop 复用到 28 层”，这是后续 descriptor + top wrapper 方案成立的前提。
+- `descriptor_dispatch_backend.py` 和 `validate_all_layer_descriptor_dispatch.py` 进一步把这件事落到 descriptor 口径上，确保后续 top wrapper 与 software scheduling 不会在层编号和地址布局上分叉。

@@ -16,6 +16,7 @@ if str(VERIFICATION_DIR) not in sys.path:
     sys.path.insert(0, str(VERIFICATION_DIR))
 
 from hls_backend_stub import HlsBackendStub
+from descriptor_dispatch_backend import DescriptorDispatchBackend
 from manual_dispatch_backend import ManualDispatchBackend
 from torch_reference_backend import TorchReferenceBackend, snapshot_cache
 
@@ -47,6 +48,8 @@ def cache_diff(lhs: Any, rhs: Any) -> dict[str, float]:
 def build_backend(name: str):
     if name == "torch":
         return TorchReferenceBackend(device="cpu")
+    if name == "descriptor-dispatch":
+        return DescriptorDispatchBackend()
     if name == "manual-dispatch":
         return ManualDispatchBackend()
     if name == "hls-stub":
@@ -129,7 +132,7 @@ def run_validation(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate full-model prefill + decode against local Qwen2.5-1.5B.")
-    parser.add_argument("--backend", choices=["torch", "manual-dispatch", "hls-stub"], default="torch")
+    parser.add_argument("--backend", choices=["torch", "descriptor-dispatch", "manual-dispatch", "hls-stub"], default="torch")
     parser.add_argument("--prompt", type=str, default="Explain the purpose of blocked attention in one sentence.")
     parser.add_argument("--decode-steps", type=int, default=1)
     parser.add_argument("--atol", type=float, default=1e-4)
@@ -138,6 +141,8 @@ def main() -> None:
 
     backend = build_backend(args.backend)
     reference_backend = backend if isinstance(backend, TorchReferenceBackend) else TorchReferenceBackend(device="cpu")
+    if isinstance(backend, DescriptorDispatchBackend):
+        reference_backend = backend.reference_backend
     if isinstance(backend, ManualDispatchBackend):
         reference_backend = backend.reference_backend
     if isinstance(backend, HlsBackendStub):
