@@ -17,7 +17,9 @@
 - `validation_prompts.json`
   - 当前默认回归 prompt 集合
 - `generate_layer0_prefill_case.py`
-  - 导出真实 Qwen2.5-1.5B 的 layer0 prefill 参考张量与 cache
+  - 导出真实 Qwen2.5-1.5B 的 layer0 prefill 子图参考张量与 cache
+- `generate_layer0_decode_case.py`
+  - 导出真实 Qwen2.5-1.5B 的 layer0 decode-step 子图参考张量与 cache
 - `validate_prefill_layer0_wrapper.py`
   - 通过 ctypes 调用 prefill shared library，检查 ABI 与 layer0 对照
 
@@ -32,3 +34,4 @@
 - `hls/build_host_wrappers.sh` 可先编译 prefill/decode 的 host-side stub shared library，用于 ABI 冒烟和后续 ctypes 接入。
 - 当前 shared library 仍然只是接口骨架，不代表已经实现 Qwen2.5-1.5B 的整网数学路径。
 - 当前建议先用 `generate_layer0_prefill_case.py` 固化 layer0 参考，再用 `validate_prefill_layer0_wrapper.py` 逐步把 prefill wrapper 从 ABI 骨架推进到真实数学实现。
+- prefill 和 decode 都优先对齐 layer0 子图张量，再逐步扩到更多层和整网闭环。

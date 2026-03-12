@@ -17,10 +17,10 @@ DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[1] / "tmp" / "reference_ca
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Export Qwen2.5-1.5B layer0 prefill reference tensors.")
+    parser = argparse.ArgumentParser(description="Export Qwen2.5-1.5B layer0 decode-step reference tensors.")
     parser.add_argument("--prompt", type=str, default="Explain the purpose of blocked attention in one sentence.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("--case-name", type=str, default="layer0_prefill_case")
+    parser.add_argument("--case-name", type=str, default="layer0_decode_case")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -30,10 +30,17 @@ def main() -> None:
     model = backend.model
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
-    captures: dict[str, torch.Tensor] = {}
+    with torch.no_grad():
+        prefill_outputs = model(
+            input_ids=input_ids.to(backend.device),
+            use_cache=True,
+            return_dict=True,
+        )
 
-    def embedding_hook(_module, _inputs, output):
-        captures["embedding_output"] = output.detach().cpu().to(torch.float32)
+    decode_input_ids = torch.argmax(prefill_outputs.logits[:, -1, :], dim=-1, keepdim=True)
+    prefill_cache_snapshot = snapshot_cache(prefill_outputs.past_key_values)
+
+    captures: dict[str, torch.Tensor] = {}
 
     def layer0_pre_hook(_module, inputs):
         captures["layer0_input"] = inputs[0].detach().cpu().to(torch.float32)
@@ -49,7 +56,6 @@ def main() -> None:
 
         return hook
 
-    embed_handle = model.model.embed_tokens.register_forward_hook(embedding_hook)
     layer0_pre_handle = model.model.layers[0].register_forward_pre_hook(layer0_pre_hook)
     layer0_handle = model.model.layers[0].register_forward_hook(layer0_hook)
     input_norm_handle = model.model.layers[0].input_layernorm.register_forward_hook(capture_tensor("input_layernorm"))
@@ -65,13 +71,13 @@ def main() -> None:
 
     try:
         with torch.no_grad():
-            outputs = model(
-                input_ids=input_ids.to(backend.device),
+            decode_outputs = model(
+                input_ids=decode_input_ids.to(backend.device),
+                past_key_values=prefill_outputs.past_key_values,
                 use_cache=True,
                 return_dict=True,
             )
     finally:
-        embed_handle.remove()
         layer0_pre_handle.remove()
         layer0_handle.remove()
         input_norm_handle.remove()
@@ -88,17 +94,19 @@ def main() -> None:
     captures["attention_residual"] = captures["layer0_input"] + captures["self_attn_output"]
     captures["silu_mul"] = F.silu(captures["gate_proj"]) * captures["up_proj"]
 
-    cache_snapshot = snapshot_cache(outputs.past_key_values)
-    layer0_k = cache_snapshot[0][0].numpy()
-    layer0_v = cache_snapshot[0][1].numpy()
+    decode_cache_snapshot = snapshot_cache(decode_outputs.past_key_values)
+    prefill_layer0_k = prefill_cache_snapshot[0][0].numpy()
+    prefill_layer0_v = prefill_cache_snapshot[0][1].numpy()
+    decode_layer0_k = decode_cache_snapshot[0][0].numpy()
+    decode_layer0_v = decode_cache_snapshot[0][1].numpy()
 
     npz_path = args.output_dir / f"{args.case_name}.npz"
     json_path = args.output_dir / f"{args.case_name}.json"
 
     np.savez_compressed(
         npz_path,
-        input_ids=input_ids.detach().cpu().numpy(),
-        embedding_output=captures["embedding_output"].numpy(),
+        prompt_input_ids=input_ids.detach().cpu().numpy(),
+        decode_input_ids=decode_input_ids.detach().cpu().numpy(),
         layer0_input=captures["layer0_input"].numpy(),
         input_layernorm=captures["input_layernorm"].numpy(),
         q_proj=captures["q_proj"].numpy(),
@@ -113,21 +121,24 @@ def main() -> None:
         silu_mul=captures["silu_mul"].numpy(),
         down_proj=captures["down_proj"].numpy(),
         layer0_output=captures["layer0_output"].numpy(),
-        final_logits=outputs.logits.detach().cpu().to(torch.float32).numpy(),
-        layer0_k_cache=layer0_k,
-        layer0_v_cache=layer0_v,
+        decode_logits=decode_outputs.logits.detach().cpu().to(torch.float32).numpy(),
+        prefill_layer0_k_cache=prefill_layer0_k,
+        prefill_layer0_v_cache=prefill_layer0_v,
+        decode_layer0_k_cache=decode_layer0_k,
+        decode_layer0_v_cache=decode_layer0_v,
     )
 
     metadata = {
         "prompt": args.prompt,
-        "seq_len": int(input_ids.shape[1]),
-        "hidden_size": int(captures["embedding_output"].shape[-1]),
+        "prefill_seq_len": int(input_ids.shape[1]),
+        "decode_seq_len": int(decode_input_ids.shape[1]),
+        "decode_token_id": int(decode_input_ids.item()),
         "tensors": sorted(captures.keys()),
         "npz_path": str(npz_path),
     }
     json_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print(f"Wrote reference case to {npz_path}")
+    print(f"Wrote decode reference case to {npz_path}")
     print(json.dumps(metadata, indent=2, ensure_ascii=False))
 
 
