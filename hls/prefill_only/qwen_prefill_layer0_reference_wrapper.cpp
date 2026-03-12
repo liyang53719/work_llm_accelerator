@@ -165,8 +165,10 @@ int qwen_prefill_layer0_reference_forward_impl(
         const float* src_v = token_v + kv_head * llm_accel::kHeadDim;
         float* dst_k = k_cache + static_cast<std::size_t>(kv_head) * cache_stride + static_cast<std::size_t>(token) * llm_accel::kHeadDim;
         float* dst_v = v_cache + static_cast<std::size_t>(kv_head) * cache_stride + static_cast<std::size_t>(token) * llm_accel::kHeadDim;
-        std::copy(src_k, src_k + llm_accel::kHeadDim, dst_k);
-        std::copy(src_v, src_v + llm_accel::kHeadDim, dst_v);
+        for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
+          dst_k[dim] = round_to_bfloat16(src_k[dim]);
+          dst_v[dim] = round_to_bfloat16(src_v[dim]);
+        }
       }
     }
   }
