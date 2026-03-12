@@ -26,10 +26,24 @@ def as_numpy(parameter: torch.Tensor | None, shape: tuple[int, ...]) -> np.ndarr
 
 def numpy_diff(lhs: np.ndarray, rhs: np.ndarray) -> dict[str, float]:
     delta = np.abs(lhs.astype(np.float32) - rhs.astype(np.float32))
+    max_flat_index = int(delta.argmax())
+    max_index = tuple(int(index) for index in np.unravel_index(max_flat_index, delta.shape))
     return {
         "max_abs_diff": float(delta.max()),
         "mean_abs_diff": float(delta.mean()),
+        "max_index": max_index,
+        "lhs_at_max": float(lhs[max_index]),
+        "rhs_at_max": float(rhs[max_index]),
     }
+
+
+def round_bfloat16_array(array: np.ndarray) -> np.ndarray:
+    rounded = np.ascontiguousarray(array.astype(np.float32)).copy()
+    bits = rounded.view(np.uint32)
+    lsb = (bits >> 16) & 1
+    bits += np.uint32(0x7FFF) + lsb
+    bits &= np.uint32(0xFFFF0000)
+    return rounded
 
 
 class ReferenceWrapperBackend(BackendInterface):
@@ -224,7 +238,7 @@ class ReferenceWrapperBackend(BackendInterface):
             if status != 0:
                 raise RuntimeError(f"Prefill wrapper failed at layer {layer_id} with status {status}")
 
-            hidden_states = output_sequence
+            hidden_states = round_bfloat16_array(output_sequence)
             cache_layers.append((torch.from_numpy(k_cache.copy()).unsqueeze(0), torch.from_numpy(v_cache.copy()).unsqueeze(0)))
             trace_layers.append({"layer_id": layer_id, "seq_len": seq_len})
 
@@ -285,7 +299,7 @@ class ReferenceWrapperBackend(BackendInterface):
             if status != 0:
                 raise RuntimeError(f"Decode wrapper failed at layer {layer_id} with status {status}")
 
-            hidden_states = output_token
+            hidden_states = round_bfloat16_array(output_token)
             next_cache_layers.append((torch.from_numpy(next_k_cache.copy()).unsqueeze(0), torch.from_numpy(next_v_cache.copy()).unsqueeze(0)))
             trace_layers.append({"layer_id": layer_id, "past_seq_len": past_seq_len})
 
@@ -350,18 +364,19 @@ class ReferenceWrapperBackend(BackendInterface):
                 if status != 0:
                     raise RuntimeError(f"Prefill wrapper failed at layer {layer_id} with status {status}")
 
+                rounded_output_sequence = round_bfloat16_array(output_sequence)
                 reference_hidden = hidden_states_ref.detach().cpu().to(torch.float32).squeeze(0).numpy()
                 reference_k = past_key_values_ref[layer_id][0].detach().cpu().to(torch.float32).squeeze(0).numpy()
                 reference_v = past_key_values_ref[layer_id][1].detach().cpu().to(torch.float32).squeeze(0).numpy()
                 layer_reports.append(
                     {
                         "layer_id": layer_id,
-                        "output_diff": numpy_diff(output_sequence, reference_hidden),
+                        "output_diff": numpy_diff(rounded_output_sequence, reference_hidden),
                         "k_cache_diff": numpy_diff(k_cache, reference_k),
                         "v_cache_diff": numpy_diff(v_cache, reference_v),
                     }
                 )
-                hidden_states_wrapper = output_sequence
+                hidden_states_wrapper = rounded_output_sequence
 
         return {"mode": "prefill", "layer_reports": layer_reports}
 
@@ -423,17 +438,18 @@ class ReferenceWrapperBackend(BackendInterface):
                 if status != 0:
                     raise RuntimeError(f"Decode wrapper failed at layer {layer_id} with status {status}")
 
+                rounded_output_token = round_bfloat16_array(output_token)
                 reference_hidden = hidden_states_ref.detach().cpu().to(torch.float32).squeeze(0).squeeze(0).numpy()
                 reference_k = past_key_values_ref[layer_id][0].detach().cpu().to(torch.float32).squeeze(0).numpy()
                 reference_v = past_key_values_ref[layer_id][1].detach().cpu().to(torch.float32).squeeze(0).numpy()
                 layer_reports.append(
                     {
                         "layer_id": layer_id,
-                        "output_diff": numpy_diff(output_token, reference_hidden),
+                        "output_diff": numpy_diff(rounded_output_token, reference_hidden),
                         "k_cache_diff": numpy_diff(next_k_cache, reference_k),
                         "v_cache_diff": numpy_diff(next_v_cache, reference_v),
                     }
                 )
-                hidden_states_wrapper = output_token
+                hidden_states_wrapper = rounded_output_token
 
         return {"mode": "decode", "layer_reports": layer_reports}

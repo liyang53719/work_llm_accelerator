@@ -23,15 +23,16 @@ float round_to_bfloat16(float value) {
 }
 
 void rmsnorm_token(const float* input, const float* weight, float rms_eps, float* output) {
-  double mean_square = 0.0;
+  float mean_square = 0.0f;
   for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
-    mean_square += static_cast<double>(input[dim]) * static_cast<double>(input[dim]);
+    mean_square += input[dim] * input[dim];
   }
-  mean_square /= static_cast<double>(llm_accel::kHiddenSize);
-  const double inv_rms = 1.0 / std::sqrt(mean_square + static_cast<double>(rms_eps));
+  mean_square /= static_cast<float>(llm_accel::kHiddenSize);
+  const float inv_rms = 1.0f / std::sqrt(mean_square + rms_eps);
   for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
-    output[dim] = round_to_bfloat16(
-        static_cast<float>(static_cast<double>(input[dim]) * inv_rms * static_cast<double>(weight[dim])));
+    const float normalized = input[dim] * inv_rms;
+    const float normalized_bf16 = round_to_bfloat16(normalized);
+    output[dim] = round_to_bfloat16(normalized_bf16 * weight[dim]);
   }
 }
 
@@ -128,14 +129,18 @@ int qwen_prefill_layer0_reference_forward_impl(
       float* q_head = q_proj_out.data() + static_cast<std::size_t>(token) * hidden_size + head * llm_accel::kHeadDim;
       for (int pair = 0; pair < llm_accel::kHeadDim / 2; ++pair) {
         const double angle = static_cast<double>(token) * inv_freq[pair];
-        const float cosv = static_cast<float>(std::cos(angle));
-        const float sinv = static_cast<float>(std::sin(angle));
+        const float cosv = round_to_bfloat16(static_cast<float>(std::cos(angle)));
+        const float sinv = round_to_bfloat16(static_cast<float>(std::sin(angle)));
         const int even_index = pair;
         const int odd_index = pair + llm_accel::kHeadDim / 2;
         const float even = q_head[even_index];
         const float odd = q_head[odd_index];
-        q_head[even_index] = even * cosv - odd * sinv;
-        q_head[odd_index] = odd * cosv + even * sinv;
+        const float even_cos = round_to_bfloat16(even * cosv);
+        const float odd_sin = round_to_bfloat16(odd * sinv);
+        const float odd_cos = round_to_bfloat16(odd * cosv);
+        const float even_sin = round_to_bfloat16(even * sinv);
+        q_head[even_index] = round_to_bfloat16(even_cos - odd_sin);
+        q_head[odd_index] = round_to_bfloat16(odd_cos + even_sin);
       }
     }
 
@@ -143,14 +148,18 @@ int qwen_prefill_layer0_reference_forward_impl(
       float* k_head = k_proj_out.data() + static_cast<std::size_t>(token) * kv_width + kv_head * llm_accel::kHeadDim;
       for (int pair = 0; pair < llm_accel::kHeadDim / 2; ++pair) {
         const double angle = static_cast<double>(token) * inv_freq[pair];
-        const float cosv = static_cast<float>(std::cos(angle));
-        const float sinv = static_cast<float>(std::sin(angle));
+        const float cosv = round_to_bfloat16(static_cast<float>(std::cos(angle)));
+        const float sinv = round_to_bfloat16(static_cast<float>(std::sin(angle)));
         const int even_index = pair;
         const int odd_index = pair + llm_accel::kHeadDim / 2;
         const float even = k_head[even_index];
         const float odd = k_head[odd_index];
-        k_head[even_index] = even * cosv - odd * sinv;
-        k_head[odd_index] = odd * cosv + even * sinv;
+        const float even_cos = round_to_bfloat16(even * cosv);
+        const float odd_sin = round_to_bfloat16(odd * sinv);
+        const float odd_cos = round_to_bfloat16(odd * cosv);
+        const float even_sin = round_to_bfloat16(even * sinv);
+        k_head[even_index] = round_to_bfloat16(even_cos - odd_sin);
+        k_head[odd_index] = round_to_bfloat16(odd_cos + even_sin);
       }
     }
   }
