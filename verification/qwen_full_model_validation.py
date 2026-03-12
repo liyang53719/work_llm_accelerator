@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 from typing import Any
+import sys
 
 import torch
 
+
+VERIFICATION_DIR = Path(__file__).resolve().parent
+if str(VERIFICATION_DIR) not in sys.path:
+    sys.path.insert(0, str(VERIFICATION_DIR))
+
 from hls_backend_stub import HlsBackendStub
+from manual_dispatch_backend import ManualDispatchBackend
 from torch_reference_backend import TorchReferenceBackend, snapshot_cache
 
 
@@ -39,6 +47,8 @@ def cache_diff(lhs: Any, rhs: Any) -> dict[str, float]:
 def build_backend(name: str):
     if name == "torch":
         return TorchReferenceBackend(device="cpu")
+    if name == "manual-dispatch":
+        return ManualDispatchBackend()
     if name == "hls-stub":
         return HlsBackendStub()
     raise ValueError(f"Unsupported backend: {name}")
@@ -119,7 +129,7 @@ def run_validation(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate full-model prefill + decode against local Qwen2.5-1.5B.")
-    parser.add_argument("--backend", choices=["torch", "hls-stub"], default="torch")
+    parser.add_argument("--backend", choices=["torch", "manual-dispatch", "hls-stub"], default="torch")
     parser.add_argument("--prompt", type=str, default="Explain the purpose of blocked attention in one sentence.")
     parser.add_argument("--decode-steps", type=int, default=1)
     parser.add_argument("--atol", type=float, default=1e-4)
@@ -128,6 +138,8 @@ def main() -> None:
 
     backend = build_backend(args.backend)
     reference_backend = backend if isinstance(backend, TorchReferenceBackend) else TorchReferenceBackend(device="cpu")
+    if isinstance(backend, ManualDispatchBackend):
+        reference_backend = backend.reference_backend
     if isinstance(backend, HlsBackendStub):
         raise NotImplementedError("HLS backend is not wired yet. Use --backend torch to validate the framework.")
     result = run_validation(args.prompt, args.decode_steps, args.atol, backend, reference_backend)

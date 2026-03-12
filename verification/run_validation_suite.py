@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
+import sys
+
+
+VERIFICATION_DIR = Path(__file__).resolve().parent
+if str(VERIFICATION_DIR) not in sys.path:
+    sys.path.insert(0, str(VERIFICATION_DIR))
 
 from hls_backend_stub import HlsBackendStub
+from manual_dispatch_backend import ManualDispatchBackend
 from qwen_full_model_validation import build_backend, run_validation
 from torch_reference_backend import TorchReferenceBackend
 
@@ -16,7 +23,7 @@ DEFAULT_PROMPTS = Path(__file__).resolve().parent / "validation_prompts.json"
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run multi-prompt Qwen2.5-1.5B validation suite.")
-    parser.add_argument("--backend", choices=["torch", "hls-stub"], default="torch")
+    parser.add_argument("--backend", choices=["torch", "manual-dispatch", "hls-stub"], default="torch")
     parser.add_argument("--prompts-file", type=Path, default=DEFAULT_PROMPTS)
     parser.add_argument("--decode-steps", type=int, default=2)
     parser.add_argument("--atol", type=float, default=1e-4)
@@ -27,6 +34,8 @@ def main() -> None:
 
     backend = build_backend(args.backend)
     reference_backend = backend if isinstance(backend, TorchReferenceBackend) else TorchReferenceBackend(device="cpu")
+    if isinstance(backend, ManualDispatchBackend):
+        reference_backend = backend.reference_backend
     if isinstance(backend, HlsBackendStub):
         raise NotImplementedError("HLS backend is not wired yet. Use --backend torch to validate the framework.")
 
