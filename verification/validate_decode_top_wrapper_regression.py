@@ -23,6 +23,7 @@ from layer_descriptor_builder import build_layer_parameter_layout, load_qwen_mod
 DEFAULT_LIB_PATH = ROOT / "tmp" / "host_libs" / "libqwen_decode_stub.so"
 HIDDEN_SIZE = 1536
 KV_WIDTH = 256
+INTERMEDIATE_SIZE = 8960
 
 
 def build_history_case() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -68,6 +69,9 @@ def main() -> None:
     k_view = weight_ddr[layout.k_weight_offset_bytes : layout.v_weight_offset_bytes]
     v_view = weight_ddr[layout.v_weight_offset_bytes : layout.o_weight_offset_bytes]
     o_view = weight_ddr[layout.o_weight_offset_bytes : layout.post_attention_layernorm_weight_offset_bytes]
+    gate_view = weight_ddr[layout.gate_weight_offset_bytes : layout.up_weight_offset_bytes]
+    up_view = weight_ddr[layout.up_weight_offset_bytes : layout.down_weight_offset_bytes]
+    down_view = weight_ddr[layout.down_weight_offset_bytes : layout.q_scale_offset_bytes]
     set_packed_weight(q_view, HIDDEN_SIZE, HIDDEN_SIZE, 0, 0, 1)
     set_packed_weight(q_view, HIDDEN_SIZE, HIDDEN_SIZE, 128, 1, -1)
     set_packed_weight(k_view, KV_WIDTH, HIDDEN_SIZE, 0, 0, 1)
@@ -76,13 +80,22 @@ def main() -> None:
     set_packed_weight(v_view, KV_WIDTH, HIDDEN_SIZE, 128, 1, 1)
     set_packed_weight(o_view, HIDDEN_SIZE, HIDDEN_SIZE, 0, 0, 1)
     set_packed_weight(o_view, HIDDEN_SIZE, HIDDEN_SIZE, 1, 128, 1)
+    set_packed_weight(gate_view, INTERMEDIATE_SIZE, HIDDEN_SIZE, 0, 0, 1)
+    set_packed_weight(up_view, INTERMEDIATE_SIZE, HIDDEN_SIZE, 0, 1, 1)
+    set_packed_weight(down_view, HIDDEN_SIZE, INTERMEDIATE_SIZE, 0, 0, 1)
 
     scale_ddr = np.zeros((layout.total_parameter_bytes + 3) // 4, dtype=np.float32)
     scale_ddr[layout.input_layernorm_weight_offset_bytes // 4 : layout.input_layernorm_weight_offset_bytes // 4 + HIDDEN_SIZE] = input_layernorm_weight
+    scale_ddr[
+        layout.post_attention_layernorm_weight_offset_bytes // 4 : layout.post_attention_layernorm_weight_offset_bytes // 4 + HIDDEN_SIZE
+    ] = input_layernorm_weight
     scale_ddr[layout.q_scale_offset_bytes // 4 : layout.q_scale_offset_bytes // 4 + HIDDEN_SIZE] = 1.0
     scale_ddr[layout.k_scale_offset_bytes // 4 : layout.k_scale_offset_bytes // 4 + KV_WIDTH] = 1.0
     scale_ddr[layout.v_scale_offset_bytes // 4 : layout.v_scale_offset_bytes // 4 + KV_WIDTH] = 1.0
     scale_ddr[layout.o_scale_offset_bytes // 4 : layout.o_scale_offset_bytes // 4 + HIDDEN_SIZE] = 1.0
+    scale_ddr[layout.gate_scale_offset_bytes // 4 : layout.gate_scale_offset_bytes // 4 + INTERMEDIATE_SIZE] = 1.0
+    scale_ddr[layout.up_scale_offset_bytes // 4 : layout.up_scale_offset_bytes // 4 + INTERMEDIATE_SIZE] = 1.0
+    scale_ddr[layout.down_scale_offset_bytes // 4 : layout.down_scale_offset_bytes // 4 + HIDDEN_SIZE] = 1.0
 
     direct_output = np.zeros(HIDDEN_SIZE, dtype=np.float32)
 
@@ -102,15 +115,22 @@ def main() -> None:
     byte_ptr = np.ctypeslib.ndpointer(dtype=np.uint8, ndim=1, flags="C_CONTIGUOUS")
     int_ptr = np.ctypeslib.ndpointer(dtype=np.int32, ndim=1, flags="C_CONTIGUOUS")
 
-    direct_func = library.qwen_decode_attention_smoke_forward
+    direct_func = library.qwen_decode_layer_smoke_forward
     direct_func.argtypes = [
         float_ptr,
         ctypes.c_int,
         float_ptr,
+        float_ptr,
         byte_ptr,
         byte_ptr,
         byte_ptr,
         byte_ptr,
+        byte_ptr,
+        byte_ptr,
+        byte_ptr,
+        float_ptr,
+        float_ptr,
+        float_ptr,
         float_ptr,
         float_ptr,
         float_ptr,
@@ -147,14 +167,21 @@ def main() -> None:
         input_token,
         2,
         input_layernorm_weight,
+        input_layernorm_weight,
         q_view,
         k_view,
         v_view,
         o_view,
+        gate_view,
+        up_view,
+        down_view,
         scale_ddr[layout.q_scale_offset_bytes // 4 : layout.q_scale_offset_bytes // 4 + HIDDEN_SIZE],
         scale_ddr[layout.k_scale_offset_bytes // 4 : layout.k_scale_offset_bytes // 4 + KV_WIDTH],
         scale_ddr[layout.v_scale_offset_bytes // 4 : layout.v_scale_offset_bytes // 4 + KV_WIDTH],
         scale_ddr[layout.o_scale_offset_bytes // 4 : layout.o_scale_offset_bytes // 4 + HIDDEN_SIZE],
+        scale_ddr[layout.gate_scale_offset_bytes // 4 : layout.gate_scale_offset_bytes // 4 + INTERMEDIATE_SIZE],
+        scale_ddr[layout.up_scale_offset_bytes // 4 : layout.up_scale_offset_bytes // 4 + INTERMEDIATE_SIZE],
+        scale_ddr[layout.down_scale_offset_bytes // 4 : layout.down_scale_offset_bytes // 4 + HIDDEN_SIZE],
         direct_k_cache,
         direct_v_cache,
         direct_output,

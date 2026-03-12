@@ -57,6 +57,29 @@ int qwen_decode_top_smoke_forward(
     float* softmax_sram,
     float* control_sram);
 
+int qwen_decode_layer_smoke_forward(
+    const float* input_token,
+    int past_seq_len,
+    const float* input_layernorm_weight,
+    const float* post_attention_layernorm_weight,
+    const std::uint8_t* q_packed_weights,
+    const std::uint8_t* k_packed_weights,
+    const std::uint8_t* v_packed_weights,
+    const std::uint8_t* o_packed_weights,
+    const std::uint8_t* gate_packed_weights,
+    const std::uint8_t* up_packed_weights,
+    const std::uint8_t* down_packed_weights,
+    const float* q_scales,
+    const float* k_scales,
+    const float* v_scales,
+    const float* o_scales,
+    const float* gate_scales,
+    const float* up_scales,
+    const float* down_scales,
+    float* k_cache,
+    float* v_cache,
+    float* output_token);
+
 int qwen_decode_layer0_reference_forward(
     const float* input_token,
     int past_seq_len,
