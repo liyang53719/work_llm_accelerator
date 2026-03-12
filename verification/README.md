@@ -30,6 +30,8 @@
   - 可复用的 layer0 prefill Python reference backend，供 wrapper 对照和逐节点验证复用
 - `validate_prefill_layer0_reference_wrapper_math.py`
   - 通过 ctypes 调用 C++ layer0 prefill reference wrapper，并直接对照导出的 layer0 输出
+- `validate_decode_layer0_reference_wrapper_math.py`
+  - 通过 ctypes 调用 C++ layer0 decode-step reference wrapper，并对照 layer0 输出与 KV cache
 
 ## 当前策略
 
@@ -41,6 +43,7 @@
 
 - `hls/build_host_wrappers.sh` 可先编译 prefill/decode 的 host-side stub shared library，用于 ABI 冒烟和后续 ctypes 接入。
 - `hls/build_host_wrappers.sh` 现在还会编译一个 C++ layer0 prefill reference wrapper，用于把 prefill host wrapper 从 identity stub 推向真实数学路径。
+- `hls/build_host_wrappers.sh` 现在也会编译一个 C++ layer0 decode-step reference wrapper，用于把 decode host wrapper 推向真实数学路径。
 - 当前 shared library 仍然只是接口骨架，不代表已经实现 Qwen2.5-1.5B 的整网数学路径。
 - 当前建议先用 `generate_layer0_prefill_case.py` 固化 layer0 参考，再用 `validate_prefill_layer0_wrapper.py` 逐步把 prefill wrapper 从 ABI 骨架推进到真实数学实现。
 - prefill 和 decode 都优先对齐 layer0 子图张量，再逐步扩到更多层和整网闭环。
