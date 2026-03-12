@@ -38,8 +38,16 @@
   - 通过 ctypes 调用 C++ layer0 decode-step reference wrapper，并对照 layer0 输出与 KV cache
 - `validate_decode_attention_smoke.py`
   - 用最小 packed-weight 场景直接调用 decode attention kernel 的 C ABI wrapper，校验 INT4 解包、RMSNorm、KV 追加和 attention 主路径
+- `validate_decode_attention_history_regression.py`
+  - 用非零历史 KV 和多头 synthetic case 对 decode attention kernel 做更强的 regression，并直接对照 Python 参考实现
+- `validate_decode_mlp_smoke.py`
+  - 用最小 packed-weight 场景直接调用 decode MLP kernel 的 C ABI wrapper，校验 post-attention RMSNorm、gate/up/down 和 residual add 路径
 - `validate_decode_top_wrapper_regression.py`
   - 用同一最小场景对比 decode top wrapper 与直接 kernel wrapper，校验 descriptor 地址解码与端口映射不出错
+- `validate_prefill_decode_summary_example.py`
+  - 用真实文本总结 prompt 联合执行 prefill + decode，并把 layer0 prefill/decode reference wrapper 直接对照 PyTorch 结果
+- `run_host_regression_suite.py`
+  - 统一串起 descriptor、decode attention/MLP smoke、top-wrapper regression 和真实 prompt 的 prefill+decode regression
 - `validate_layer_dispatch_layout.py`
   - 校验 decode/prefill 的 all-layer descriptor 生成、DDR 地址布局和 1 MB SRAM 分区口径
 - `validate_all_layer_manual_dispatch.py`

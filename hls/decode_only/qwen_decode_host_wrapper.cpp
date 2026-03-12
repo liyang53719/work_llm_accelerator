@@ -52,12 +52,14 @@ extern "C" int qwen_decode_stub_forward(
 
   KernelStatus mlp_status = qwen_decode_mlp_kernel(
       attention_output.data(),
-      nullptr,
-      nullptr,
-      nullptr,
-      nullptr,
-      nullptr,
-      nullptr,
+      input_layernorm_weight.data(),
+      kRmsNormEps,
+      q_weights.data(),
+      q_weights.data(),
+      o_weights.data(),
+      q_scales.data(),
+      q_scales.data(),
+      o_scales.data(),
       output_token);
   return mlp_status.ok ? 0 : mlp_status.error_code;
 }
@@ -137,5 +139,29 @@ extern "C" int qwen_decode_top_smoke_forward(
       control_sram,
   };
   KernelStatus status = qwen_decode_top_wrapper(descriptor, ports);
+  return status.ok ? 0 : status.error_code;
+}
+
+extern "C" int qwen_decode_mlp_smoke_forward(
+    const float* attention_residual_token,
+    const float* post_attention_layernorm_weight,
+    const std::uint8_t* gate_packed_weights,
+    const std::uint8_t* up_packed_weights,
+    const std::uint8_t* down_packed_weights,
+    const float* gate_scales,
+    const float* up_scales,
+    const float* down_scales,
+    float* output_token) {
+  KernelStatus status = qwen_decode_mlp_kernel(
+      attention_residual_token,
+      post_attention_layernorm_weight,
+      kRmsNormEps,
+      gate_packed_weights,
+      up_packed_weights,
+      down_packed_weights,
+      gate_scales,
+      up_scales,
+      down_scales,
+      output_token);
   return status.ok ? 0 : status.error_code;
 }

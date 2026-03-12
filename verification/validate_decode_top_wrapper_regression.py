@@ -25,6 +25,22 @@ HIDDEN_SIZE = 1536
 KV_WIDTH = 256
 
 
+def build_history_case() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    input_token = np.zeros(HIDDEN_SIZE, dtype=np.float32)
+    input_token[0] = 1.0
+    input_token[1] = -0.75
+    input_token[2] = 0.5
+
+    k_cache = np.zeros(KV_WIDTH * 3, dtype=np.float32)
+    v_cache = np.zeros(KV_WIDTH * 3, dtype=np.float32)
+    for token in range(2):
+        k_cache[token * KV_WIDTH + 0] = 0.25 * (token + 1)
+        k_cache[token * KV_WIDTH + 128] = -0.5 * (token + 1)
+        v_cache[token * KV_WIDTH + 0] = 1.25 * (token + 1)
+        v_cache[token * KV_WIDTH + 128] = -1.5 * (token + 1)
+    return input_token, k_cache, v_cache
+
+
 def set_packed_weight(packed: np.ndarray, out_dim: int, in_dim: int, out_index: int, in_index: int, value: int) -> None:
     flat_index = out_index * in_dim + in_index
     byte_index = flat_index // 2
@@ -44,8 +60,7 @@ def main() -> None:
     spec = load_qwen_model_spec()
     layout = build_layer_parameter_layout(spec)
 
-    input_token = np.zeros(HIDDEN_SIZE, dtype=np.float32)
-    input_token[0] = 1.0
+    input_token, direct_k_cache, direct_v_cache = build_history_case()
     input_layernorm_weight = np.ones(HIDDEN_SIZE, dtype=np.float32)
 
     weight_ddr = np.zeros(layout.total_parameter_bytes, dtype=np.uint8)
@@ -54,9 +69,13 @@ def main() -> None:
     v_view = weight_ddr[layout.v_weight_offset_bytes : layout.o_weight_offset_bytes]
     o_view = weight_ddr[layout.o_weight_offset_bytes : layout.post_attention_layernorm_weight_offset_bytes]
     set_packed_weight(q_view, HIDDEN_SIZE, HIDDEN_SIZE, 0, 0, 1)
+    set_packed_weight(q_view, HIDDEN_SIZE, HIDDEN_SIZE, 128, 1, -1)
     set_packed_weight(k_view, KV_WIDTH, HIDDEN_SIZE, 0, 0, 1)
+    set_packed_weight(k_view, KV_WIDTH, HIDDEN_SIZE, 128, 1, -1)
     set_packed_weight(v_view, KV_WIDTH, HIDDEN_SIZE, 0, 0, 1)
+    set_packed_weight(v_view, KV_WIDTH, HIDDEN_SIZE, 128, 1, 1)
     set_packed_weight(o_view, HIDDEN_SIZE, HIDDEN_SIZE, 0, 0, 1)
+    set_packed_weight(o_view, HIDDEN_SIZE, HIDDEN_SIZE, 1, 128, 1)
 
     scale_ddr = np.zeros((layout.total_parameter_bytes + 3) // 4, dtype=np.float32)
     scale_ddr[layout.input_layernorm_weight_offset_bytes // 4 : layout.input_layernorm_weight_offset_bytes // 4 + HIDDEN_SIZE] = input_layernorm_weight
@@ -65,13 +84,13 @@ def main() -> None:
     scale_ddr[layout.v_scale_offset_bytes // 4 : layout.v_scale_offset_bytes // 4 + KV_WIDTH] = 1.0
     scale_ddr[layout.o_scale_offset_bytes // 4 : layout.o_scale_offset_bytes // 4 + HIDDEN_SIZE] = 1.0
 
-    direct_k_cache = np.zeros(KV_WIDTH, dtype=np.float32)
-    direct_v_cache = np.zeros(KV_WIDTH, dtype=np.float32)
     direct_output = np.zeros(HIDDEN_SIZE, dtype=np.float32)
 
     activation_ddr = np.zeros(HIDDEN_SIZE * 2, dtype=np.float32)
     activation_ddr[:HIDDEN_SIZE] = input_token
-    kv_cache_ddr = np.zeros(KV_WIDTH * 2, dtype=np.float32)
+    kv_cache_ddr = np.zeros(KV_WIDTH * 6, dtype=np.float32)
+    kv_cache_ddr[: KV_WIDTH * 2] = direct_k_cache[: KV_WIDTH * 2]
+    kv_cache_ddr[KV_WIDTH * 3 : KV_WIDTH * 5] = direct_v_cache[: KV_WIDTH * 2]
     weight_sram = np.zeros(1, dtype=np.uint8)
     kv_sram = np.zeros(1, dtype=np.float32)
     partial_sum_sram = np.zeros(1, dtype=np.int32)
@@ -126,7 +145,7 @@ def main() -> None:
 
     status = direct_func(
         input_token,
-        0,
+        2,
         input_layernorm_weight,
         q_view,
         k_view,
@@ -145,13 +164,13 @@ def main() -> None:
 
     status = top_func(
         0,
-        0,
+        2,
         0,
         HIDDEN_SIZE * 4,
         0,
         0,
         0,
-        KV_WIDTH * 4,
+        KV_WIDTH * 3 * 4,
         weight_ddr,
         scale_ddr,
         kv_cache_ddr,
@@ -166,8 +185,8 @@ def main() -> None:
         raise RuntimeError(f"Top wrapper smoke failed with status {status}")
 
     top_output = activation_ddr[HIDDEN_SIZE : HIDDEN_SIZE * 2]
-    top_k_cache = kv_cache_ddr[:KV_WIDTH]
-    top_v_cache = kv_cache_ddr[KV_WIDTH : KV_WIDTH * 2]
+    top_k_cache = kv_cache_ddr[: KV_WIDTH * 3]
+    top_v_cache = kv_cache_ddr[KV_WIDTH * 3 : KV_WIDTH * 6]
     if np.max(np.abs(top_output - direct_output)) > args.atol:
         raise AssertionError("Top-wrapper output diverged from direct kernel output")
     if np.max(np.abs(top_k_cache - direct_k_cache)) > args.atol:

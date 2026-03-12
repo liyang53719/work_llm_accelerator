@@ -27,6 +27,17 @@ int qwen_decode_attention_smoke_forward(
     float* v_cache,
     float* output_token);
 
+int qwen_decode_mlp_smoke_forward(
+    const float* attention_residual_token,
+    const float* post_attention_layernorm_weight,
+    const std::uint8_t* gate_packed_weights,
+    const std::uint8_t* up_packed_weights,
+    const std::uint8_t* down_packed_weights,
+    const float* gate_scales,
+    const float* up_scales,
+    const float* down_scales,
+    float* output_token);
+
 int qwen_decode_top_smoke_forward(
     int layer_id,
     int past_seq_len,
