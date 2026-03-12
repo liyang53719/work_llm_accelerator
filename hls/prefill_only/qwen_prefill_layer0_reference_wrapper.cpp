@@ -3,11 +3,24 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "../common/qwen2_model_config.h"
 
 namespace {
+
+float round_to_bfloat16(float value) {
+  std::uint32_t bits = 0;
+  std::memcpy(&bits, &value, sizeof(bits));
+  const std::uint32_t lsb = (bits >> 16) & 1U;
+  bits += 0x7FFFU + lsb;
+  bits &= 0xFFFF0000U;
+  float rounded = 0.0f;
+  std::memcpy(&rounded, &bits, sizeof(rounded));
+  return rounded;
+}
 
 void rmsnorm_token(const float* input, const float* weight, float rms_eps, float* output) {
   double mean_square = 0.0;
@@ -17,7 +30,8 @@ void rmsnorm_token(const float* input, const float* weight, float rms_eps, float
   mean_square /= static_cast<double>(llm_accel::kHiddenSize);
   const double inv_rms = 1.0 / std::sqrt(mean_square + static_cast<double>(rms_eps));
   for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
-    output[dim] = static_cast<float>(static_cast<double>(input[dim]) * inv_rms * static_cast<double>(weight[dim]));
+    output[dim] = round_to_bfloat16(
+        static_cast<float>(static_cast<double>(input[dim]) * inv_rms * static_cast<double>(weight[dim])));
   }
 }
 
@@ -34,7 +48,7 @@ void linear_row_major(
     for (int in_index = 0; in_index < in_dim; ++in_index) {
       sum += static_cast<double>(input[in_index]) * static_cast<double>(weight_row[in_index]);
     }
-    output[out_index] = static_cast<float>(sum);
+    output[out_index] = round_to_bfloat16(static_cast<float>(sum));
   }
 }
 
@@ -42,9 +56,7 @@ float silu(float value) {
   return value / (1.0f + std::exp(-value));
 }
 
-}  // namespace
-
-extern "C" int qwen_prefill_layer0_reference_forward(
+int qwen_prefill_layer0_reference_forward_impl(
     const float* input_sequence,
     int seq_len,
     const float* input_layernorm_weight,
@@ -64,8 +76,14 @@ extern "C" int qwen_prefill_layer0_reference_forward(
     const float* down_weight,
     const float* down_bias,
     float rms_eps,
-    float* output_sequence) {
+    float* output_sequence,
+    float* k_cache,
+    float* v_cache) {
   if (input_sequence == nullptr || output_sequence == nullptr || seq_len <= 0 || seq_len > llm_accel::kMaxSequenceLength) {
+    return 1;
+  }
+
+  if ((k_cache == nullptr) != (v_cache == nullptr)) {
     return 1;
   }
 
@@ -137,6 +155,22 @@ extern "C" int qwen_prefill_layer0_reference_forward(
     }
   }
 
+  if (k_cache != nullptr && v_cache != nullptr) {
+    const std::size_t cache_stride = static_cast<std::size_t>(seq_len) * llm_accel::kHeadDim;
+    for (int token = 0; token < seq_len; ++token) {
+      const float* token_k = k_proj_out.data() + static_cast<std::size_t>(token) * kv_width;
+      const float* token_v = v_proj_out.data() + static_cast<std::size_t>(token) * kv_width;
+      for (int kv_head = 0; kv_head < llm_accel::kNumKeyValueHeads; ++kv_head) {
+        const float* src_k = token_k + kv_head * llm_accel::kHeadDim;
+        const float* src_v = token_v + kv_head * llm_accel::kHeadDim;
+        float* dst_k = k_cache + static_cast<std::size_t>(kv_head) * cache_stride + static_cast<std::size_t>(token) * llm_accel::kHeadDim;
+        float* dst_v = v_cache + static_cast<std::size_t>(kv_head) * cache_stride + static_cast<std::size_t>(token) * llm_accel::kHeadDim;
+        std::copy(src_k, src_k + llm_accel::kHeadDim, dst_k);
+        std::copy(src_v, src_v + llm_accel::kHeadDim, dst_v);
+      }
+    }
+  }
+
   for (int token = 0; token < seq_len; ++token) {
     for (int head = 0; head < llm_accel::kNumAttentionHeads; ++head) {
       const int kv_head = head / num_groups;
@@ -204,4 +238,100 @@ extern "C" int qwen_prefill_layer0_reference_forward(
   }
 
   return 0;
+}
+
+}  // namespace
+
+extern "C" int qwen_prefill_layer0_reference_forward(
+    const float* input_sequence,
+    int seq_len,
+    const float* input_layernorm_weight,
+    const float* q_weight,
+    const float* q_bias,
+    const float* k_weight,
+    const float* k_bias,
+    const float* v_weight,
+    const float* v_bias,
+    const float* o_weight,
+    const float* o_bias,
+    const float* post_attention_layernorm_weight,
+    const float* gate_weight,
+    const float* gate_bias,
+    const float* up_weight,
+    const float* up_bias,
+    const float* down_weight,
+    const float* down_bias,
+    float rms_eps,
+    float* output_sequence) {
+  return qwen_prefill_layer0_reference_forward_impl(
+      input_sequence,
+      seq_len,
+      input_layernorm_weight,
+      q_weight,
+      q_bias,
+      k_weight,
+      k_bias,
+      v_weight,
+      v_bias,
+      o_weight,
+      o_bias,
+      post_attention_layernorm_weight,
+      gate_weight,
+      gate_bias,
+      up_weight,
+      up_bias,
+      down_weight,
+      down_bias,
+      rms_eps,
+      output_sequence,
+      nullptr,
+      nullptr);
+}
+
+extern "C" int qwen_prefill_layer0_reference_forward_with_cache(
+    const float* input_sequence,
+    int seq_len,
+    const float* input_layernorm_weight,
+    const float* q_weight,
+    const float* q_bias,
+    const float* k_weight,
+    const float* k_bias,
+    const float* v_weight,
+    const float* v_bias,
+    const float* o_weight,
+    const float* o_bias,
+    const float* post_attention_layernorm_weight,
+    const float* gate_weight,
+    const float* gate_bias,
+    const float* up_weight,
+    const float* up_bias,
+    const float* down_weight,
+    const float* down_bias,
+    float rms_eps,
+    float* output_sequence,
+    float* k_cache,
+    float* v_cache) {
+  return qwen_prefill_layer0_reference_forward_impl(
+      input_sequence,
+      seq_len,
+      input_layernorm_weight,
+      q_weight,
+      q_bias,
+      k_weight,
+      k_bias,
+      v_weight,
+      v_bias,
+      o_weight,
+      o_bias,
+      post_attention_layernorm_weight,
+      gate_weight,
+      gate_bias,
+      up_weight,
+      up_bias,
+      down_weight,
+      down_bias,
+      rms_eps,
+      output_sequence,
+      k_cache,
+      v_cache);
 }

@@ -18,6 +18,7 @@ if str(VERIFICATION_DIR) not in sys.path:
 from hls_backend_stub import HlsBackendStub
 from descriptor_dispatch_backend import DescriptorDispatchBackend
 from manual_dispatch_backend import ManualDispatchBackend
+from reference_wrapper_backend import ReferenceWrapperBackend
 from torch_reference_backend import TorchReferenceBackend, snapshot_cache
 
 
@@ -52,6 +53,8 @@ def build_backend(name: str):
         return DescriptorDispatchBackend()
     if name == "manual-dispatch":
         return ManualDispatchBackend()
+    if name == "reference-wrapper":
+        return ReferenceWrapperBackend()
     if name == "hls-stub":
         return HlsBackendStub()
     raise ValueError(f"Unsupported backend: {name}")
@@ -132,7 +135,7 @@ def run_validation(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Validate full-model prefill + decode against local Qwen2.5-1.5B.")
-    parser.add_argument("--backend", choices=["torch", "descriptor-dispatch", "manual-dispatch", "hls-stub"], default="torch")
+    parser.add_argument("--backend", choices=["torch", "descriptor-dispatch", "manual-dispatch", "reference-wrapper", "hls-stub"], default="torch")
     parser.add_argument("--prompt", type=str, default="Explain the purpose of blocked attention in one sentence.")
     parser.add_argument("--decode-steps", type=int, default=1)
     parser.add_argument("--atol", type=float, default=1e-4)
@@ -144,6 +147,8 @@ def main() -> None:
     if isinstance(backend, DescriptorDispatchBackend):
         reference_backend = backend.reference_backend
     if isinstance(backend, ManualDispatchBackend):
+        reference_backend = backend.reference_backend
+    if isinstance(backend, ReferenceWrapperBackend):
         reference_backend = backend.reference_backend
     if isinstance(backend, HlsBackendStub):
         raise NotImplementedError("HLS backend is not wired yet. Use --backend torch to validate the framework.")
