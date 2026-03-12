@@ -91,6 +91,15 @@
 - `tmp/`
   - 实验日志、中间报表、设计点输出
 
+新增设计文档：
+
+- `docs/layer_dispatch_design.md`
+  - 说明为什么 `layer0` 只作为单层数学金标
+  - 说明 28 层如何通过 `layer_id + base address` 复用同一 kernel
+- `docs/memory_architecture.md`
+  - 固化 1 MB SRAM 分区和 DDR 地址空间边界
+  - 为后续 AXI top-level 和 Catapult architect 提供统一口径
+
 ## 7. 阶段门控
 
 ### 阶段 A：Feasibility
@@ -112,6 +121,8 @@
 
 - decode-only 与 prefill-only 各自至少有一条 kernel 主线
 - host 侧 testbench 可以对齐软件参考
+- 单层 reference wrapper 与多层 dispatch validator 的职责已经分开
+- top-level 接口不再扩展 layer-specific 参数表，而是切换到 descriptor + DDR base 的形式
 - Catapult 至少跑到 architect
 - 指标采集方式固定下来
 
@@ -153,6 +164,7 @@
 4. 定义 prefill-only 的 blocked attention baseline kernel 划分。
 5. 约定 Catapult 输出格式、metric 命名和日志归档路径。
 6. 定义验证分层，避免把 full-model、kernel-level、quant-level 误差混在一起。
+7. 定义 layer dispatch descriptor、DDR 地址空间和 1 MB SRAM working-set 口径。
 
 ## 9. 关键风险
 
@@ -160,6 +172,7 @@
 - 2K MAC 在 decode 路线上未必先受算力限制，但在 prefill blocked attention 中可能转化为 tile 选择和 feed 效率问题。
 - 如果没有明确的 banking 模型，Catapult 的 architect 成功并不等于真实实现可落地。
 - 如果过早把 prefill 与 decode 共用接口，可能导致两边都无法收敛。
+- 如果 reference wrapper 持续演化成超长参数表，后续需要再次拆分成 AXI + descriptor 接口，成本会翻倍。
 
 ## 10. 推荐推进策略
 
@@ -167,6 +180,7 @@
 2. 并行建立 prefill attention 骨架，不等 decode 完全收敛后才启动。
 3. 以 workload 和 memory-system 解释驱动设计，而不是只做广义 unroll sweep。
 4. 在两条路径各自稳定前，不把 unified kernel 作为短期交付目标。
+5. 在进入 Catapult architect 前，先固定 layer dispatch 和 memory architecture，避免接口在实现中反复返工。
 
 ## 11. 当前结论
 

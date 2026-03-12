@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
 tmp/host_libs/
+tmp/*.o
 tmp/reference_cases/
 tmp/reference_params/

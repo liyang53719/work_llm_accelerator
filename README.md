@@ -38,4 +38,10 @@
 3. 完成 Catapult architect 级可行性后，再进行定向设计点收敛。
 4. 只有在两条路径都稳定后，才考虑统一成 prefill+decode 共享内核。
 
+## 当前阶段说明
+
+- 当前仓库已经具备 layer0 级别的 reference wrapper 与 host 侧验证路径。
+- 这些 reference wrapper 的职责是固定单层数学口径，不是最终 RTL 接口。
+- 下一步实现会切到 `descriptor + DDR/AXI + 1 MB SRAM working-set` 的边界上，避免继续扩展 layer-specific 参数表。
+
 详细计划见 `docs/project_plan.md`。
