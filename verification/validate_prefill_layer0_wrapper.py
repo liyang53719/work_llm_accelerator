@@ -7,6 +7,9 @@ import ctypes
 from pathlib import Path
 
 import numpy as np
+import torch
+
+from layer0_prefill_reference_backend import Layer0PrefillReferenceBackend
 
 
 DEFAULT_CASE_PATH = Path(__file__).resolve().parents[1] / "tmp" / "reference_cases" / "layer0_prefill_case.npz"
@@ -27,6 +30,7 @@ def main() -> None:
     parser.add_argument("--lib-path", type=Path, default=DEFAULT_LIB_PATH)
     parser.add_argument("--tile-m", type=int, default=64)
     parser.add_argument("--expect-identity", action="store_true")
+    parser.add_argument("--compare-reference-backend", action="store_true")
     args = parser.parse_args()
 
     case = np.load(args.case_path)
@@ -50,6 +54,12 @@ def main() -> None:
 
     print("Wrapper output vs input:", identity_diff)
     print("Wrapper output vs layer0 reference:", layer0_diff)
+
+    if args.compare_reference_backend:
+        backend = Layer0PrefillReferenceBackend()
+        backend_output = backend.run(torch.from_numpy(case["layer0_input"]).to(torch.float32)).layer0_output.numpy().reshape(-1)
+        backend_diff = diff_report(output_sequence, backend_output)
+        print("Wrapper output vs layer0 reference backend:", backend_diff)
 
     if args.expect_identity and identity_diff["max_abs_diff"] != 0.0:
         raise AssertionError("Current prefill wrapper is expected to behave as identity stub, but output drifted.")

@@ -24,6 +24,8 @@
   - 通过 ctypes 调用 prefill shared library，检查 ABI 与 layer0 对照
 - `validate_layer0_prefill_reference_math.py`
   - 用独立的 layer0 prefill 数学路径重建 Qwen2.5-1.5B layer0，并逐节点对照导出的子图张量
+- `layer0_prefill_reference_backend.py`
+  - 可复用的 layer0 prefill Python reference backend，供 wrapper 对照和逐节点验证复用
 
 ## 当前策略
 
@@ -38,3 +40,4 @@
 - 当前建议先用 `generate_layer0_prefill_case.py` 固化 layer0 参考，再用 `validate_prefill_layer0_wrapper.py` 逐步把 prefill wrapper 从 ABI 骨架推进到真实数学实现。
 - prefill 和 decode 都优先对齐 layer0 子图张量，再逐步扩到更多层和整网闭环。
 - 在把 C++/HLS kernel 做实前，先用 `validate_layer0_prefill_reference_math.py` 把 Python 层的数学规格跑通，避免边实现边猜公式。
+- `layer0_prefill_reference_backend.py` 是当前 prefill layer0 的单一数学规格来源；后续 wrapper 对照和子图验证都应复用它，而不是复制实现。
