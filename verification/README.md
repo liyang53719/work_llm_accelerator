@@ -36,6 +36,10 @@
   - 通过 ctypes 调用 C++ layer0 prefill reference wrapper，并直接对照导出的 layer0 输出
 - `validate_decode_layer0_reference_wrapper_math.py`
   - 通过 ctypes 调用 C++ layer0 decode-step reference wrapper，并对照 layer0 输出与 KV cache
+- `validate_decode_attention_smoke.py`
+  - 用最小 packed-weight 场景直接调用 decode attention kernel 的 C ABI wrapper，校验 INT4 解包、RMSNorm、KV 追加和 attention 主路径
+- `validate_decode_top_wrapper_regression.py`
+  - 用同一最小场景对比 decode top wrapper 与直接 kernel wrapper，校验 descriptor 地址解码与端口映射不出错
 - `validate_layer_dispatch_layout.py`
   - 校验 decode/prefill 的 all-layer descriptor 生成、DDR 地址布局和 1 MB SRAM 分区口径
 - `validate_all_layer_manual_dispatch.py`

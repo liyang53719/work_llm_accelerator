@@ -10,6 +10,37 @@ namespace {
 constexpr int kKvWidth = llm_accel::kNumKeyValueHeads * llm_accel::kHeadDim;
 constexpr int kNumGroups = llm_accel::kNumAttentionHeads / llm_accel::kNumKeyValueHeads;
 
+void rmsnorm_token(
+    const llm_accel::scalar_t* input,
+    const llm_accel::scalar_t* weight,
+    llm_accel::scalar_t rms_eps,
+    llm_accel::scalar_t* output) {
+  double mean_square = 0.0;
+  for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
+    mean_square += static_cast<double>(input[dim]) * static_cast<double>(input[dim]);
+  }
+  mean_square /= static_cast<double>(llm_accel::kHiddenSize);
+  const double inv_rms = 1.0 / std::sqrt(mean_square + static_cast<double>(rms_eps));
+  for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
+    output[dim] = static_cast<float>(static_cast<double>(input[dim]) * inv_rms * static_cast<double>(weight[dim]));
+  }
+}
+
+void apply_rope_inplace(llm_accel::scalar_t* head, int token_index) {
+  for (int pair = 0; pair < llm_accel::kHeadDim / 2; ++pair) {
+    const double angle = static_cast<double>(token_index) *
+        std::pow(static_cast<double>(llm_accel::kRopeTheta), -2.0 * static_cast<double>(pair) / static_cast<double>(llm_accel::kHeadDim));
+    const float cosv = static_cast<float>(std::cos(angle));
+    const float sinv = static_cast<float>(std::sin(angle));
+    const int even_index = pair;
+    const int odd_index = pair + llm_accel::kHeadDim / 2;
+    const float even = head[even_index];
+    const float odd = head[odd_index];
+    head[even_index] = even * cosv - odd * sinv;
+    head[odd_index] = odd * cosv + even * sinv;
+  }
+}
+
 float decode_int4_weight(llm_accel::packed_w4_t packed_value, bool high_nibble) {
   const int nibble = high_nibble ? static_cast<int>((packed_value >> 4) & 0xF) : static_cast<int>(packed_value & 0xF);
   const int signed_nibble = nibble >= 8 ? nibble - 16 : nibble;
@@ -134,6 +165,8 @@ namespace llm_accel {
 KernelStatus qwen_decode_attention_kernel(
     const scalar_t* input_token,
     int past_seq_len,
+  const scalar_t* input_layernorm_weight,
+  scalar_t rms_eps,
     const packed_w4_t* q_packed_weights,
     const packed_w4_t* k_packed_weights,
     const packed_w4_t* v_packed_weights,
@@ -145,20 +178,30 @@ KernelStatus qwen_decode_attention_kernel(
     scalar_t* k_cache,
     scalar_t* v_cache,
     scalar_t* output_token) {
-  if (input_token == nullptr || output_token == nullptr || past_seq_len < 0 || q_packed_weights == nullptr ||
+  if (input_token == nullptr || output_token == nullptr || past_seq_len < 0 || input_layernorm_weight == nullptr ||
+      q_packed_weights == nullptr ||
       k_packed_weights == nullptr || v_packed_weights == nullptr || o_packed_weights == nullptr || q_scales == nullptr ||
       k_scales == nullptr || v_scales == nullptr || o_scales == nullptr || k_cache == nullptr || v_cache == nullptr) {
     return {false, 1};
   }
 
+  std::array<scalar_t, kHiddenSize> input_norm{};
   std::array<scalar_t, kHiddenSize> q_proj{};
   std::array<scalar_t, kKvWidth> k_proj{};
   std::array<scalar_t, kKvWidth> v_proj{};
   std::array<scalar_t, kHiddenSize> context{};
 
-  project_tiled(input_token, q_packed_weights, q_scales, kHiddenSize, q_proj.data());
-  project_tiled(input_token, k_packed_weights, k_scales, kKvWidth, k_proj.data());
-  project_tiled(input_token, v_packed_weights, v_scales, kKvWidth, v_proj.data());
+  rmsnorm_token(input_token, input_layernorm_weight, rms_eps, input_norm.data());
+  project_tiled(input_norm.data(), q_packed_weights, q_scales, kHiddenSize, q_proj.data());
+  project_tiled(input_norm.data(), k_packed_weights, k_scales, kKvWidth, k_proj.data());
+  project_tiled(input_norm.data(), v_packed_weights, v_scales, kKvWidth, v_proj.data());
+
+  for (int head = 0; head < kNumAttentionHeads; ++head) {
+    apply_rope_inplace(q_proj.data() + head * kHeadDim, past_seq_len);
+  }
+  for (int head = 0; head < kNumKeyValueHeads; ++head) {
+    apply_rope_inplace(k_proj.data() + head * kHeadDim, past_seq_len);
+  }
 
   append_kv_cache(k_proj.data(), v_proj.data(), past_seq_len, k_cache, v_cache);
   decode_attention_context(q_proj.data(), k_cache, v_cache, past_seq_len + 1, context.data());

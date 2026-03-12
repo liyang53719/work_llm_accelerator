@@ -16,6 +16,7 @@ g++ -std=c++17 -O2 -fPIC -shared \
 g++ -std=c++17 -O2 -fPIC -shared \
   "$ROOT_DIR/hls/decode_only/qwen_decode_attention_kernel.cpp" \
   "$ROOT_DIR/hls/decode_only/qwen_decode_mlp_kernel.cpp" \
+  "$ROOT_DIR/hls/decode_only/qwen_decode_top_wrapper.cpp" \
   "$ROOT_DIR/hls/decode_only/qwen_decode_host_wrapper.cpp" \
   "$ROOT_DIR/hls/decode_only/qwen_decode_layer0_reference_wrapper.cpp" \
   -o "$OUT_DIR/libqwen_decode_stub.so"
