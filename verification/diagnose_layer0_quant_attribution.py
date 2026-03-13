@@ -19,8 +19,10 @@ if str(VERIFICATION_DIR) not in sys.path:
 
 from diagnose_layer0_prefill_wrapper_stages import (  # noqa: E402
     DEFAULT_CASE_PATH,
+    linear_row_major_rows,
     diff_report,
     linear_row_major,
+    rmsnorm_rows,
     rmsnorm_token,
     run_wrapper_emulation,
     silu,
@@ -79,12 +81,13 @@ def ensure_parent_dir(path: Path) -> None:
 
 def unpack_int4_per_channel(packed: np.ndarray, scales: np.ndarray, out_dim: int, in_dim: int) -> np.ndarray:
     flat = packed.astype(np.uint8, copy=False).reshape(-1)
-    unpacked = np.empty(out_dim * in_dim, dtype=np.float32)
-    for index in range(unpacked.size):
-        packed_byte = int(flat[index // 2])
-        nibble = ((packed_byte >> 4) & 0xF) if (index & 1) else (packed_byte & 0xF)
-        unpacked[index] = float(nibble - 16 if nibble >= 8 else nibble)
-    return unpacked.reshape(out_dim, in_dim) * scales[:, None]
+    low = flat & np.uint8(0x0F)
+    high = (flat >> np.uint8(4)) & np.uint8(0x0F)
+    interleaved = np.empty(flat.size * 2, dtype=np.int8)
+    interleaved[0::2] = low.astype(np.int8)
+    interleaved[1::2] = high.astype(np.int8)
+    signed = np.where(interleaved >= 8, interleaved - 16, interleaved).astype(np.float32, copy=False)
+    return signed[: out_dim * in_dim].reshape(out_dim, in_dim) * scales[:, None]
 
 
 def quantized_weight(weight: torch.Tensor, out_dim: int, in_dim: int) -> np.ndarray:
@@ -96,6 +99,37 @@ def optional_bias(module: torch.nn.Module) -> np.ndarray | None:
     if module.bias is None:
         return None
     return module.bias.detach().cpu().to(torch.float32).numpy()
+
+
+def get_cached_quant_params(reference: Layer0PrefillReferenceBackend) -> dict[str, np.ndarray | None]:
+    cache = getattr(reference, "_quant_attr_cache", None)
+    if cache is not None:
+        return cache
+
+    layer = reference.layer
+    hidden_size = reference.model.config.hidden_size
+    intermediate_size = reference.model.config.intermediate_size
+    head_dim = hidden_size // reference.model.config.num_attention_heads
+    kv_width = reference.model.config.num_key_value_heads * head_dim
+
+    cache = {
+        "q_weight_quant": quantized_weight(layer.self_attn.q_proj.weight, hidden_size, hidden_size),
+        "k_weight_quant": quantized_weight(layer.self_attn.k_proj.weight, kv_width, hidden_size),
+        "v_weight_quant": quantized_weight(layer.self_attn.v_proj.weight, kv_width, hidden_size),
+        "o_weight_quant": quantized_weight(layer.self_attn.o_proj.weight, hidden_size, hidden_size),
+        "gate_weight_quant": quantized_weight(layer.mlp.gate_proj.weight, intermediate_size, hidden_size),
+        "up_weight_quant": quantized_weight(layer.mlp.up_proj.weight, intermediate_size, hidden_size),
+        "down_weight_quant": quantized_weight(layer.mlp.down_proj.weight, hidden_size, intermediate_size),
+        "q_bias": optional_bias(layer.self_attn.q_proj),
+        "k_bias": optional_bias(layer.self_attn.k_proj),
+        "v_bias": optional_bias(layer.self_attn.v_proj),
+        "o_bias": optional_bias(layer.self_attn.o_proj),
+        "gate_bias": optional_bias(layer.mlp.gate_proj),
+        "up_bias": optional_bias(layer.mlp.up_proj),
+        "down_bias": optional_bias(layer.mlp.down_proj),
+    }
+    reference._quant_attr_cache = cache
+    return cache
 
 
 def range_report(lhs: np.ndarray, rhs: np.ndarray) -> dict[str, float | tuple[int, ...]]:
@@ -122,35 +156,38 @@ def range_report(lhs: np.ndarray, rhs: np.ndarray) -> dict[str, float | tuple[in
     return report
 
 
+def apply_rotary_decimal(states: np.ndarray, cos_values: np.ndarray, sin_values: np.ndarray) -> np.ndarray:
+    half_dim = states.shape[-1] // 2
+    even = states[..., :half_dim]
+    odd = states[..., half_dim:]
+    cos_term = cos_values[:, None, :]
+    sin_term = sin_values[:, None, :]
+    rotated_even = np.float32(even * cos_term - odd * sin_term)
+    rotated_odd = np.float32(odd * cos_term + even * sin_term)
+    return np.concatenate([rotated_even, rotated_odd], axis=-1)
+
+
 def run_mlp_only_quant_emulation(reference: Layer0PrefillReferenceBackend, float_outputs: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     layer = reference.layer
     hidden_size = reference.model.config.hidden_size
-    intermediate_size = reference.model.config.intermediate_size
     rms_eps = float(reference.model.config.rms_norm_eps)
+    quant_params = get_cached_quant_params(reference)
 
     post_ln_weight = layer.post_attention_layernorm.weight.detach().cpu().to(torch.float32).numpy()
-    gate_weight = quantized_weight(layer.mlp.gate_proj.weight, intermediate_size, hidden_size)
-    up_weight = quantized_weight(layer.mlp.up_proj.weight, intermediate_size, hidden_size)
-    down_weight = quantized_weight(layer.mlp.down_proj.weight, hidden_size, intermediate_size)
-    gate_bias = optional_bias(layer.mlp.gate_proj)
-    up_bias = optional_bias(layer.mlp.up_proj)
-    down_bias = optional_bias(layer.mlp.down_proj)
+    gate_weight = quant_params["gate_weight_quant"]
+    up_weight = quant_params["up_weight_quant"]
+    down_weight = quant_params["down_weight_quant"]
+    gate_bias = quant_params["gate_bias"]
+    up_bias = quant_params["up_bias"]
+    down_bias = quant_params["down_bias"]
 
-    seq_len = float_outputs["attention_residual"].shape[0]
-    post_attention_layernorm = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    gate_proj = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    up_proj = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    silu_mul = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    down_proj = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    layer0_output = np.zeros((seq_len, hidden_size), dtype=np.float32)
-
-    for token in range(seq_len):
-        post_attention_layernorm[token] = rmsnorm_token(float_outputs["attention_residual"][token], post_ln_weight, rms_eps)
-        gate_proj[token] = linear_row_major(post_attention_layernorm[token], gate_weight, gate_bias)
-        up_proj[token] = linear_row_major(post_attention_layernorm[token], up_weight, up_bias)
-        silu_mul[token] = silu(gate_proj[token]) * up_proj[token]
-        down_proj[token] = linear_row_major(silu_mul[token], down_weight, down_bias)
-        layer0_output[token] = float_outputs["attention_residual"][token] + down_proj[token]
+    attention_residual = float_outputs["attention_residual"]
+    post_attention_layernorm = rmsnorm_rows(attention_residual, post_ln_weight, rms_eps)
+    gate_proj = linear_row_major_rows(post_attention_layernorm, gate_weight, gate_bias)
+    up_proj = linear_row_major_rows(post_attention_layernorm, up_weight, up_bias)
+    silu_mul = silu(gate_proj) * up_proj
+    down_proj = linear_row_major_rows(silu_mul, down_weight, down_bias)
+    layer0_output = attention_residual + down_proj
 
     outputs = dict(float_outputs)
     outputs.update(
@@ -172,7 +209,6 @@ def run_attention_only_quant_emulation(reference: Layer0PrefillReferenceBackend,
     config = model.config
 
     hidden_size = config.hidden_size
-    intermediate_size = config.intermediate_size
     num_attention_heads = config.num_attention_heads
     num_key_value_heads = config.num_key_value_heads
     head_dim = hidden_size // num_attention_heads
@@ -180,19 +216,20 @@ def run_attention_only_quant_emulation(reference: Layer0PrefillReferenceBackend,
     num_groups = num_attention_heads // num_key_value_heads
     scaling = float(layer.self_attn.scaling)
     rms_eps = float(config.rms_norm_eps)
+    quant_params = get_cached_quant_params(reference)
 
     input_np = layer0_input.detach().cpu().to(torch.float32).squeeze(0).numpy()
     input_ln_weight = layer.input_layernorm.weight.detach().cpu().to(torch.float32).numpy()
     post_ln_weight = layer.post_attention_layernorm.weight.detach().cpu().to(torch.float32).numpy()
 
-    q_weight = quantized_weight(layer.self_attn.q_proj.weight, hidden_size, hidden_size)
-    k_weight = quantized_weight(layer.self_attn.k_proj.weight, kv_width, hidden_size)
-    v_weight = quantized_weight(layer.self_attn.v_proj.weight, kv_width, hidden_size)
-    o_weight = quantized_weight(layer.self_attn.o_proj.weight, hidden_size, hidden_size)
-    q_bias = optional_bias(layer.self_attn.q_proj)
-    k_bias = optional_bias(layer.self_attn.k_proj)
-    v_bias = optional_bias(layer.self_attn.v_proj)
-    o_bias = optional_bias(layer.self_attn.o_proj)
+    q_weight = quant_params["q_weight_quant"]
+    k_weight = quant_params["k_weight_quant"]
+    v_weight = quant_params["v_weight_quant"]
+    o_weight = quant_params["o_weight_quant"]
+    q_bias = quant_params["q_bias"]
+    k_bias = quant_params["k_bias"]
+    v_bias = quant_params["v_bias"]
+    o_bias = quant_params["o_bias"]
     gate_weight = layer.mlp.gate_proj.weight.detach().cpu().to(torch.float32).numpy()
     gate_bias = optional_bias(layer.mlp.gate_proj)
     up_weight = layer.mlp.up_proj.weight.detach().cpu().to(torch.float32).numpy()
@@ -201,77 +238,56 @@ def run_attention_only_quant_emulation(reference: Layer0PrefillReferenceBackend,
     down_bias = optional_bias(layer.mlp.down_proj)
 
     seq_len = input_np.shape[0]
-    input_layernorm = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    q_proj = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    k_proj = np.zeros((seq_len, kv_width), dtype=np.float32)
-    v_proj = np.zeros((seq_len, kv_width), dtype=np.float32)
-
-    for token in range(seq_len):
-        input_layernorm[token] = rmsnorm_token(input_np[token], input_ln_weight, rms_eps)
-        q_proj[token] = linear_row_major(input_layernorm[token], q_weight, q_bias)
-        k_proj[token] = linear_row_major(input_layernorm[token], k_weight, k_bias)
-        v_proj[token] = linear_row_major(input_layernorm[token], v_weight, v_bias)
+    input_layernorm = rmsnorm_rows(input_np, input_ln_weight, rms_eps)
+    q_proj = linear_row_major_rows(input_layernorm, q_weight, q_bias)
+    k_proj = linear_row_major_rows(input_layernorm, k_weight, k_bias)
+    v_proj = linear_row_major_rows(input_layernorm, v_weight, v_bias)
 
     q_rot = q_proj.copy().reshape(seq_len, num_attention_heads, head_dim)
     k_rot_kv = k_proj.copy().reshape(seq_len, num_key_value_heads, head_dim)
     inv_freq = np.array([1000000.0 ** (-2.0 * index / head_dim) for index in range(head_dim // 2)], dtype=np.float64)
+    positions = np.arange(seq_len, dtype=np.float64)[:, None]
+    angles = positions * inv_freq[None, :]
+    cos_values = np.round(np.cos(angles), 7).astype(np.float32)
+    sin_values = np.round(np.sin(angles), 7).astype(np.float32)
 
-    for token in range(seq_len):
-        for head in range(num_attention_heads):
-            for pair in range(head_dim // 2):
-                angle = float(token) * float(inv_freq[pair])
-                cosv = np.float32(round(float(np.cos(angle)), 7))
-                sinv = np.float32(round(float(np.sin(angle)), 7))
-                even = q_rot[token, head, pair]
-                odd = q_rot[token, head, pair + head_dim // 2]
-                q_rot[token, head, pair] = np.float32(even * cosv - odd * sinv)
-                q_rot[token, head, pair + head_dim // 2] = np.float32(odd * cosv + even * sinv)
-        for kv_head in range(num_key_value_heads):
-            for pair in range(head_dim // 2):
-                angle = float(token) * float(inv_freq[pair])
-                cosv = np.float32(round(float(np.cos(angle)), 7))
-                sinv = np.float32(round(float(np.sin(angle)), 7))
-                even = k_rot_kv[token, kv_head, pair]
-                odd = k_rot_kv[token, kv_head, pair + head_dim // 2]
-                k_rot_kv[token, kv_head, pair] = np.float32(even * cosv - odd * sinv)
-                k_rot_kv[token, kv_head, pair + head_dim // 2] = np.float32(odd * cosv + even * sinv)
+    q_rot = apply_rotary_decimal(q_rot, cos_values, sin_values)
+    k_rot_kv = apply_rotary_decimal(k_rot_kv, cos_values, sin_values)
 
     k_rot = np.repeat(k_rot_kv, num_groups, axis=1)
     attn_probs = np.zeros((num_attention_heads, seq_len, seq_len), dtype=np.float32)
+    v_heads = v_proj.reshape(seq_len, num_key_value_heads, head_dim)
+    v_repeated = np.repeat(v_heads, num_groups, axis=1)
     attn_context = np.zeros((seq_len, hidden_size), dtype=np.float32)
 
     for token in range(seq_len):
-        for head in range(num_attention_heads):
-            kv_head = head // num_groups
-            scores = np.zeros(token + 1, dtype=np.float64)
-            for src in range(token + 1):
-                scores[src] = float(np.dot(q_rot[token, head], k_rot[src, head])) * scaling
-            max_score = np.max(scores)
-            probs = np.exp(scores - max_score)
-            probs = probs / np.sum(probs)
-            attn_probs[head, token, : token + 1] = probs.astype(np.float32)
-            for dim in range(head_dim):
-                values = v_proj[: token + 1, kv_head * head_dim + dim]
-                attn_context[token, head * head_dim + dim] = np.float32(np.dot(probs, values))
+        token_scores = np.einsum(
+            "hd,shd->hs",
+            q_rot[token].astype(np.float64, copy=False),
+            k_rot[: token + 1].astype(np.float64, copy=False),
+            optimize=True,
+        )
+        token_scores = token_scores * scaling
+        max_scores = np.max(token_scores, axis=1, keepdims=True)
+        probs = np.exp(token_scores - max_scores)
+        probs = probs / np.sum(probs, axis=1, keepdims=True)
+        attn_probs[:, token, : token + 1] = probs.astype(np.float32)
+        token_context = np.einsum(
+            "hs,shd->hd",
+            probs.astype(np.float64, copy=False),
+            v_repeated[: token + 1].astype(np.float64, copy=False),
+            optimize=True,
+        )
+        attn_context[token] = token_context.astype(np.float32, copy=False).reshape(hidden_size)
 
-    o_proj = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    attention_residual = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    post_attention_layernorm = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    gate_proj = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    up_proj = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    silu_mul = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    down_proj = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    layer0_output = np.zeros((seq_len, hidden_size), dtype=np.float32)
-
-    for token in range(seq_len):
-        o_proj[token] = linear_row_major(attn_context[token], o_weight, o_bias)
-        attention_residual[token] = input_np[token] + o_proj[token]
-        post_attention_layernorm[token] = rmsnorm_token(attention_residual[token], post_ln_weight, rms_eps)
-        gate_proj[token] = linear_row_major(post_attention_layernorm[token], gate_weight, gate_bias)
-        up_proj[token] = linear_row_major(post_attention_layernorm[token], up_weight, up_bias)
-        silu_mul[token] = silu(gate_proj[token]) * up_proj[token]
-        down_proj[token] = linear_row_major(silu_mul[token], down_weight, down_bias)
-        layer0_output[token] = attention_residual[token] + down_proj[token]
+    o_proj = linear_row_major_rows(attn_context, o_weight, o_bias)
+    attention_residual = input_np + o_proj
+    post_attention_layernorm = rmsnorm_rows(attention_residual, post_ln_weight, rms_eps)
+    gate_proj = linear_row_major_rows(post_attention_layernorm, gate_weight, gate_bias)
+    up_proj = linear_row_major_rows(post_attention_layernorm, up_weight, up_bias)
+    silu_mul = silu(gate_proj) * up_proj
+    down_proj = linear_row_major_rows(silu_mul, down_weight, down_bias)
+    layer0_output = attention_residual + down_proj
 
     return {
         "input_layernorm": input_layernorm,

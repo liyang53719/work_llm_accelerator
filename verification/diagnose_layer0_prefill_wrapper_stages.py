@@ -27,6 +27,15 @@ def round_bfloat16_scalar(value: float) -> float:
     return bits.view(np.float32)[0].item()
 
 
+def round_bfloat16_array(values: np.ndarray) -> np.ndarray:
+    rounded = np.asarray(values, dtype=np.float32).copy()
+    bits = rounded.view(np.uint32)
+    lsb = (bits >> 16) & np.uint32(1)
+    bits += np.uint32(0x7FFF) + lsb
+    bits &= np.uint32(0xFFFF0000)
+    return bits.view(np.float32)
+
+
 def diff_report(lhs: np.ndarray, rhs: np.ndarray) -> dict[str, float | tuple[int, ...]]:
     delta = np.abs(lhs.astype(np.float32) - rhs.astype(np.float32))
     max_flat_index = int(delta.argmax())
@@ -43,28 +52,51 @@ def diff_report(lhs: np.ndarray, rhs: np.ndarray) -> dict[str, float | tuple[int
 def rmsnorm_token(input_token: np.ndarray, weight: np.ndarray, rms_eps: float) -> np.ndarray:
     mean_square = np.mean(input_token.astype(np.float32) * input_token.astype(np.float32), dtype=np.float32)
     inv_rms = np.float32(1.0 / np.sqrt(np.float32(mean_square + np.float32(rms_eps))))
-    output = np.zeros_like(input_token, dtype=np.float32)
-    for dim in range(input_token.shape[0]):
-        normalized = np.float32(input_token[dim] * inv_rms)
-        normalized_bf16 = np.float32(round_bfloat16_scalar(float(normalized)))
-        output[dim] = np.float32(round_bfloat16_scalar(float(normalized_bf16 * weight[dim])))
+    normalized = np.asarray(input_token, dtype=np.float32) * inv_rms
+    normalized_bf16 = round_bfloat16_array(normalized)
+    return round_bfloat16_array(normalized_bf16 * np.asarray(weight, dtype=np.float32))
+
+
+def rmsnorm_rows(input_rows: np.ndarray, weight: np.ndarray, rms_eps: float) -> np.ndarray:
+    output = np.zeros_like(input_rows, dtype=np.float32)
+    for row_index in range(input_rows.shape[0]):
+        output[row_index] = rmsnorm_token(input_rows[row_index], weight, rms_eps)
     return output
 
 
 def linear_row_major(input_token: np.ndarray, weight: np.ndarray, bias: np.ndarray | None) -> np.ndarray:
-    out_dim, in_dim = weight.shape
-    output = np.zeros(out_dim, dtype=np.float32)
-    for out_index in range(out_dim):
-        total = float(bias[out_index]) if bias is not None else 0.0
-        row = weight[out_index]
-        for in_index in range(in_dim):
-            total += float(input_token[in_index]) * float(row[in_index])
-        output[out_index] = np.float32(round_bfloat16_scalar(total))
-    return output
+    return linear_row_major_rows(np.asarray(input_token, dtype=np.float32)[None, :], weight, bias)[0]
+
+
+def linear_row_major_rows(input_rows: np.ndarray, weight: np.ndarray, bias: np.ndarray | None) -> np.ndarray:
+    totals = np.matmul(
+        np.asarray(input_rows, dtype=np.float32).astype(np.float64, copy=False),
+        np.asarray(weight, dtype=np.float32).T.astype(np.float64, copy=False),
+    )
+    if bias is not None:
+        totals = totals + np.asarray(bias, dtype=np.float32).astype(np.float64, copy=False)[None, :]
+    return round_bfloat16_array(totals.astype(np.float32, copy=False))
 
 
 def silu(value: np.ndarray) -> np.ndarray:
     return value / (1.0 + np.exp(-value))
+
+
+def apply_rotary_bf16(states: np.ndarray, cos_values: np.ndarray, sin_values: np.ndarray) -> np.ndarray:
+    half_dim = states.shape[-1] // 2
+    even = states[..., :half_dim]
+    odd = states[..., half_dim:]
+    cos_term = cos_values[:, None, :]
+    sin_term = sin_values[:, None, :]
+
+    even_cos = round_bfloat16_array(even * cos_term)
+    odd_sin = round_bfloat16_array(odd * sin_term)
+    odd_cos = round_bfloat16_array(odd * cos_term)
+    even_sin = round_bfloat16_array(even * sin_term)
+
+    rotated_even = round_bfloat16_array(even_cos - odd_sin)
+    rotated_odd = round_bfloat16_array(odd_cos + even_sin)
+    return np.concatenate([rotated_even, rotated_odd], axis=-1)
 
 
 def optional_bias(module: torch.nn.Module) -> np.ndarray | None:
@@ -108,93 +140,56 @@ def run_wrapper_emulation(reference: Layer0PrefillReferenceBackend, layer0_input
     down_bias = optional_bias(layer.mlp.down_proj)
 
     seq_len = input_np.shape[0]
-    input_layernorm = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    q_proj = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    k_proj = np.zeros((seq_len, kv_width), dtype=np.float32)
-    v_proj = np.zeros((seq_len, kv_width), dtype=np.float32)
-
-    for token in range(seq_len):
-        input_layernorm[token] = rmsnorm_token(input_np[token], input_ln_weight, rms_eps)
-        q_proj[token] = linear_row_major(input_layernorm[token], q_weight, q_bias)
-        k_proj[token] = linear_row_major(input_layernorm[token], k_weight, k_bias)
-        v_proj[token] = linear_row_major(input_layernorm[token], v_weight, v_bias)
+    input_layernorm = rmsnorm_rows(input_np, input_ln_weight, rms_eps)
+    q_proj = linear_row_major_rows(input_layernorm, q_weight, q_bias)
+    k_proj = linear_row_major_rows(input_layernorm, k_weight, k_bias)
+    v_proj = linear_row_major_rows(input_layernorm, v_weight, v_bias)
 
     q_rot = q_proj.copy().reshape(seq_len, num_attention_heads, head_dim)
     k_rot_kv = k_proj.copy().reshape(seq_len, num_key_value_heads, head_dim)
-    inv_freq = np.array(
-        [1000000.0 ** (-2.0 * index / head_dim) for index in range(head_dim // 2)],
-        dtype=np.float64,
-    )
+    inv_freq = np.array([1000000.0 ** (-2.0 * index / head_dim) for index in range(head_dim // 2)], dtype=np.float64)
+    positions = np.arange(seq_len, dtype=np.float64)[:, None]
+    angles = positions * inv_freq[None, :]
+    cos_values = round_bfloat16_array(np.cos(angles).astype(np.float32))
+    sin_values = round_bfloat16_array(np.sin(angles).astype(np.float32))
 
-    for token in range(seq_len):
-        for head in range(num_attention_heads):
-            for pair in range(head_dim // 2):
-                angle = float(token) * float(inv_freq[pair])
-                cosv = np.float32(round_bfloat16_scalar(float(np.cos(angle))))
-                sinv = np.float32(round_bfloat16_scalar(float(np.sin(angle))))
-                even = q_rot[token, head, pair]
-                odd = q_rot[token, head, pair + head_dim // 2]
-                even_cos = np.float32(round_bfloat16_scalar(float(even * cosv)))
-                odd_sin = np.float32(round_bfloat16_scalar(float(odd * sinv)))
-                odd_cos = np.float32(round_bfloat16_scalar(float(odd * cosv)))
-                even_sin = np.float32(round_bfloat16_scalar(float(even * sinv)))
-                q_rot[token, head, pair] = np.float32(round_bfloat16_scalar(float(even_cos - odd_sin)))
-                q_rot[token, head, pair + head_dim // 2] = np.float32(round_bfloat16_scalar(float(odd_cos + even_sin)))
-        for kv_head in range(num_key_value_heads):
-            for pair in range(head_dim // 2):
-                angle = float(token) * float(inv_freq[pair])
-                cosv = np.float32(round_bfloat16_scalar(float(np.cos(angle))))
-                sinv = np.float32(round_bfloat16_scalar(float(np.sin(angle))))
-                even = k_rot_kv[token, kv_head, pair]
-                odd = k_rot_kv[token, kv_head, pair + head_dim // 2]
-                even_cos = np.float32(round_bfloat16_scalar(float(even * cosv)))
-                odd_sin = np.float32(round_bfloat16_scalar(float(odd * sinv)))
-                odd_cos = np.float32(round_bfloat16_scalar(float(odd * cosv)))
-                even_sin = np.float32(round_bfloat16_scalar(float(even * sinv)))
-                k_rot_kv[token, kv_head, pair] = np.float32(round_bfloat16_scalar(float(even_cos - odd_sin)))
-                k_rot_kv[token, kv_head, pair + head_dim // 2] = np.float32(round_bfloat16_scalar(float(odd_cos + even_sin)))
+    q_rot = apply_rotary_bf16(q_rot, cos_values, sin_values)
+    k_rot_kv = apply_rotary_bf16(k_rot_kv, cos_values, sin_values)
 
     k_rot = np.repeat(k_rot_kv, num_groups, axis=1)
     attn_probs = np.zeros((num_attention_heads, seq_len, seq_len), dtype=np.float32)
+    v_heads = v_proj.reshape(seq_len, num_key_value_heads, head_dim)
+    v_repeated = np.repeat(v_heads, num_groups, axis=1)
 
     attn_context = np.zeros((seq_len, hidden_size), dtype=np.float32)
     for token in range(seq_len):
-        for head in range(num_attention_heads):
-            kv_head = head // num_groups
-            scores = np.zeros(token + 1, dtype=np.float64)
-            for src in range(token + 1):
-                dot = 0.0
-                for dim in range(head_dim):
-                    dot += float(q_rot[token, head, dim]) * float(k_rot[src, head, dim])
-                scores[src] = dot * scaling
-            max_score = np.max(scores)
-            probs = np.exp(scores - max_score)
-            probs = probs / np.sum(probs)
-            attn_probs[head, token, : token + 1] = probs.astype(np.float32)
-            for dim in range(head_dim):
-                accum = 0.0
-                for src in range(token + 1):
-                    accum += float(probs[src]) * float(v_proj[src, kv_head * head_dim + dim])
-                attn_context[token, head * head_dim + dim] = np.float32(accum)
+        token_scores = np.einsum(
+            "hd,shd->hs",
+            q_rot[token].astype(np.float64, copy=False),
+            k_rot[: token + 1].astype(np.float64, copy=False),
+            optimize=True,
+        )
+        token_scores = token_scores * scaling
+        max_scores = np.max(token_scores, axis=1, keepdims=True)
+        probs = np.exp(token_scores - max_scores)
+        probs = probs / np.sum(probs, axis=1, keepdims=True)
+        attn_probs[:, token, : token + 1] = probs.astype(np.float32)
+        token_context = np.einsum(
+            "hs,shd->hd",
+            probs.astype(np.float64, copy=False),
+            v_repeated[: token + 1].astype(np.float64, copy=False),
+            optimize=True,
+        )
+        attn_context[token] = token_context.astype(np.float32, copy=False).reshape(hidden_size)
 
-    o_proj = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    attention_residual = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    post_attention_layernorm = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    gate_proj = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    up_proj = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    silu_mul = np.zeros((seq_len, intermediate_size), dtype=np.float32)
-    down_proj = np.zeros((seq_len, hidden_size), dtype=np.float32)
-    layer0_output = np.zeros((seq_len, hidden_size), dtype=np.float32)
-
-    for token in range(seq_len):
-        o_proj[token] = linear_row_major(attn_context[token], o_weight, o_bias)
-        attention_residual[token] = input_np[token] + o_proj[token]
-        post_attention_layernorm[token] = rmsnorm_token(attention_residual[token], post_ln_weight, rms_eps)
-        gate_proj[token] = linear_row_major(post_attention_layernorm[token], gate_weight, gate_bias)
-        up_proj[token] = linear_row_major(post_attention_layernorm[token], up_weight, up_bias)
-        silu_mul[token] = silu(gate_proj[token]) * up_proj[token]
-        down_proj[token] = linear_row_major(silu_mul[token], down_weight, down_bias)
-        layer0_output[token] = attention_residual[token] + down_proj[token]
+    o_proj = linear_row_major_rows(attn_context, o_weight, o_bias)
+    attention_residual = input_np + o_proj
+    post_attention_layernorm = rmsnorm_rows(attention_residual, post_ln_weight, rms_eps)
+    gate_proj = linear_row_major_rows(post_attention_layernorm, gate_weight, gate_bias)
+    up_proj = linear_row_major_rows(post_attention_layernorm, up_weight, up_bias)
+    silu_mul = silu(gate_proj) * up_proj
+    down_proj = linear_row_major_rows(silu_mul, down_weight, down_bias)
+    layer0_output = attention_residual + down_proj
 
     return {
         "input_layernorm": input_layernorm,
