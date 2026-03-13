@@ -45,6 +45,7 @@
 - layer0 reference wrapper 的职责是固定单层数学口径，不是最终 RTL 接口，也不再被视为“真实计算路径”。
 - decode attention/MLP/top-wrapper 已有真实计算路径；prefill 侧现在也具备 attention + MLP + top-wrapper 的完整层路径。
 - prefill attention、prefill MLP 和 prefill top-wrapper 都已有独立 smoke/regression，数据比对可直接走 host `.so` 完成。
+- 新增 `real-host-top` backend 后，整网 validator 已可直接复用 quantized top-wrapper 路径跑完整 prefill + decode；这一层属于“真实 host 近似路径”，误差口径与 exact dispatch validator 分开维护。
 - 下一步实现会从“单层完整路径已通”推进到“prefill 整网真实路径接入统一 backend/validator”，同时继续保持 `descriptor + DDR/AXI + 1 MB SRAM working-set` 的边界，不再扩展 layer-specific 参数表。
 - host 侧回归现在同时覆盖 descriptor/layout 校验、prefill attention/MLP/top-wrapper 和 decode 路径 smoke/regression，用于锁定多层复用和地址空间口径。
 
