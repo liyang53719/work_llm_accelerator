@@ -17,6 +17,7 @@
 - Clock：1 GHz
 - 目标：至少 10 token/s
 - 输出位置：全部文件保存在 `work_llm_accelerator/`
+- attention backend：验证与参考路径统一只允许 `sdpa`
 
 ## 3. 独立性要求
 
@@ -165,6 +166,13 @@
 5. 约定 Catapult 输出格式、metric 命名和日志归档路径。
 6. 定义验证分层，避免把 full-model、kernel-level、quant-level 误差混在一起。
 7. 定义 layer dispatch descriptor、DDR 地址空间和 1 MB SRAM working-set 口径。
+
+## 8.1 当前验证口径补充
+
+- `TorchReferenceBackend`、manual dispatch、descriptor dispatch 和 full-model validator 已统一收敛到 `sdpa-only`，启动时应显式校验当前 backend。
+- `reference wrapper` 继续作为数学金标与定位工具，不再作为“真实计算路径”的定义来源。
+- decode 侧当前已有真实 attention/MLP/top-wrapper 路径；prefill 侧已补上第一版真实 attention kernel，并具备独立 smoke validator。
+- prefill MLP 和 prefill top-wrapper regression 仍待补齐；在这两项闭合前，不进入 Catapult/RTL 交付阶段。
 
 ## 9. 关键风险
 

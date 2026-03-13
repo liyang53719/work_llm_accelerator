@@ -39,6 +39,8 @@ KernelStatus qwen_prefill_top_wrapper(
   scalar_t* output_sequence = scalar_ptr(ports.activation_ddr, descriptor.output_sequence_addr);
   scalar_t* k_cache = scalar_ptr(ports.kv_cache_ddr, descriptor.k_cache_base_addr);
   scalar_t* v_cache = scalar_ptr(ports.kv_cache_ddr, descriptor.v_cache_base_addr);
+  const scalar_t* input_layernorm_weight =
+      scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.input_layernorm_weight_offset_bytes);
 
   const packed_w4_t* q_weights =
       weight_ptr(ports.weight_ddr, descriptor.layer_weights_base_addr + layout.q_weight_offset_bytes);
@@ -58,6 +60,8 @@ KernelStatus qwen_prefill_top_wrapper(
       input_sequence,
       descriptor.seq_len,
       descriptor.tile_m,
+      input_layernorm_weight,
+      kRmsNormEps,
       q_weights,
       k_weights,
       v_weights,

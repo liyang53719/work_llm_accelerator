@@ -9,7 +9,7 @@ from transformers.models.qwen2.modeling_qwen2 import create_causal_mask, create_
 
 from backend_interface import BackendInterface, DecodeResult, PrefillResult
 from manual_dispatch_backend import ManualDispatchBackend
-from torch_reference_backend import move_cache_to_device
+from torch_reference_backend import SDPA_ATTENTION_BACKEND, get_attention_backend, move_cache_to_device
 
 
 class DescriptorDispatchBackend(BackendInterface):
@@ -27,6 +27,11 @@ class DescriptorDispatchBackend(BackendInterface):
         self.device = self.manual_backend.device
         self.model = self.manual_backend.model
         self.tokenizer = self.manual_backend.tokenizer
+        self.attention_backend = get_attention_backend(self.model)
+        if self.attention_backend != SDPA_ATTENTION_BACKEND:
+            raise AssertionError(
+                f"DescriptorDispatchBackend requires attention backend '{SDPA_ATTENTION_BACKEND}', got '{self.attention_backend}'."
+            )
         self.activation_base_addr = activation_base_addr
         self.weight_base_addr = weight_base_addr
         self.scale_base_addr = scale_base_addr

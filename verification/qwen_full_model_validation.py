@@ -19,7 +19,7 @@ from hls_backend_stub import HlsBackendStub
 from descriptor_dispatch_backend import DescriptorDispatchBackend
 from manual_dispatch_backend import ManualDispatchBackend
 from reference_wrapper_backend import ReferenceWrapperBackend
-from torch_reference_backend import TorchReferenceBackend, snapshot_cache
+from torch_reference_backend import SDPA_ATTENTION_BACKEND, TorchReferenceBackend, get_attention_backend, snapshot_cache
 
 
 def tensor_diff(lhs: torch.Tensor, rhs: torch.Tensor) -> dict[str, float]:
@@ -60,6 +60,26 @@ def build_backend(name: str):
     raise ValueError(f"Unsupported backend: {name}")
 
 
+def collect_attention_backend_info(backend: Any, reference_backend: TorchReferenceBackend) -> dict[str, str]:
+    reference_attention_backend = get_attention_backend(reference_backend.model)
+    if reference_attention_backend != SDPA_ATTENTION_BACKEND:
+        raise AssertionError(
+            f"Reference backend must use '{SDPA_ATTENTION_BACKEND}', got '{reference_attention_backend}'."
+        )
+
+    backend_model = getattr(backend, "model", None)
+    backend_attention_backend = reference_attention_backend if backend_model is None else get_attention_backend(backend_model)
+    if backend_attention_backend != SDPA_ATTENTION_BACKEND:
+        raise AssertionError(
+            f"Backend must use '{SDPA_ATTENTION_BACKEND}', got '{backend_attention_backend}'."
+        )
+
+    return {
+        "reference": reference_attention_backend,
+        "backend": backend_attention_backend,
+    }
+
+
 def run_validation(
     prompt: str,
     decode_steps: int,
@@ -67,6 +87,7 @@ def run_validation(
     backend: Any,
     reference_backend: TorchReferenceBackend,
 ) -> dict[str, Any]:
+    attention_backend = collect_attention_backend_info(backend, reference_backend)
     tokenizer = reference_backend.tokenizer
     baseline_model = reference_backend.model
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids
@@ -87,6 +108,7 @@ def run_validation(
 
     result = {
         "prompt": prompt,
+        "attention_backend": attention_backend,
         "prefill_logits_diff": prefill_logits_diff,
         "prefill_cache_diff": prefill_cache_diff,
         "decode_steps": [],
@@ -159,6 +181,7 @@ def main() -> None:
         print("Validation PASS")
         return
 
+    print("Attention backend:", result["attention_backend"])
     print("Prefill logits diff:", result["prefill_logits_diff"])
     print("Prefill cache diff:", result["prefill_cache_diff"])
     for decode_result in result["decode_steps"]:

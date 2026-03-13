@@ -18,6 +18,24 @@ if str(PYTHON_DIR) not in sys.path:
 from qwen_model_spec import MODEL_PATH  # noqa: E402
 
 
+SDPA_ATTENTION_BACKEND = "sdpa"
+
+
+def get_attention_backend(model: Any) -> str:
+    backend = getattr(model.config, "_attn_implementation", None)
+    if backend is None:
+        raise AssertionError("Model config is missing _attn_implementation.")
+    return str(backend)
+
+
+def enforce_sdpa_attention(model: Any) -> str:
+    model.config._attn_implementation = SDPA_ATTENTION_BACKEND
+    backend = get_attention_backend(model)
+    if backend != SDPA_ATTENTION_BACKEND:
+        raise AssertionError(f"Expected attention backend '{SDPA_ATTENTION_BACKEND}', got '{backend}'.")
+    return backend
+
+
 def snapshot_cache(cache: Any) -> Any:
     if cache is None:
         return None
@@ -49,6 +67,7 @@ class TorchReferenceBackend(BackendInterface):
             dtype=torch.bfloat16,
             low_cpu_mem_usage=True,
         )
+        self.attention_backend = enforce_sdpa_attention(self.model)
         self.model.eval()
         self.model.to(self.device)
 

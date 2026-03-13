@@ -7,7 +7,7 @@ from transformers.cache_utils import DynamicCache
 from transformers.models.qwen2.modeling_qwen2 import create_causal_mask, create_sliding_window_causal_mask
 
 from backend_interface import BackendInterface, DecodeResult, PrefillResult
-from torch_reference_backend import TorchReferenceBackend, move_cache_to_device
+from torch_reference_backend import SDPA_ATTENTION_BACKEND, TorchReferenceBackend, get_attention_backend, move_cache_to_device
 
 
 class ManualDispatchBackend(BackendInterface):
@@ -16,6 +16,11 @@ class ManualDispatchBackend(BackendInterface):
         self.device = self.reference_backend.device
         self.tokenizer = self.reference_backend.tokenizer
         self.model = self.reference_backend.model
+        self.attention_backend = get_attention_backend(self.model)
+        if self.attention_backend != SDPA_ATTENTION_BACKEND:
+            raise AssertionError(
+                f"ManualDispatchBackend requires attention backend '{SDPA_ATTENTION_BACKEND}', got '{self.attention_backend}'."
+            )
 
     def _run_manual_dispatch(self, input_ids: torch.Tensor, cache: Any) -> tuple[torch.Tensor, Any]:
         qwen_model = self.model.model

@@ -35,6 +35,7 @@ def main() -> None:
         print("Manual dispatch validation PASS")
         return
 
+    print("Attention backend:", result["attention_backend"])
     print("Prefill logits diff:", result["prefill_logits_diff"])
     print("Prefill cache diff:", result["prefill_cache_diff"])
     for decode_result in result["decode_steps"]:

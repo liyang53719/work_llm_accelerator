@@ -46,6 +46,7 @@ def main() -> None:
         raise NotImplementedError("HLS backend is not wired yet. Use --backend torch to validate the framework.")
 
     summary = []
+    print("Attention backend:", {"reference": reference_backend.attention_backend, "backend": getattr(backend, "attention_backend", reference_backend.attention_backend)})
     for prompt in prompts:
         result = run_validation(prompt, args.decode_steps, args.atol, backend, reference_backend)
         summary.append(result)

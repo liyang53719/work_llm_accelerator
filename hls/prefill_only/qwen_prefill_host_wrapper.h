@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -8,6 +10,23 @@ int qwen_prefill_stub_forward(
     const float* input_sequence,
     int seq_len,
     int tile_m,
+    float* output_sequence);
+
+int qwen_prefill_attention_smoke_forward(
+    const float* input_sequence,
+    int seq_len,
+    int tile_m,
+    const float* input_layernorm_weight,
+    const std::uint8_t* q_packed_weights,
+    const std::uint8_t* k_packed_weights,
+    const std::uint8_t* v_packed_weights,
+    const std::uint8_t* o_packed_weights,
+    const float* q_scales,
+    const float* k_scales,
+    const float* v_scales,
+    const float* o_scales,
+    float* k_cache,
+    float* v_cache,
     float* output_sequence);
 
 int qwen_prefill_layer0_reference_forward(

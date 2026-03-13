@@ -17,6 +17,7 @@
 - 不允许直接调用、复制或依赖 `work/` 中的源码、脚本、共享库、综合产物或中间结果。
 - Prefill 与 decode 必须都被纳入架构预算、验证计划和 Catapult 设计空间探索。
 - 优先保证验证链和指标口径清晰，再推进更激进的并行化或 unified kernel。
+- attention backend 统一只允许 `sdpa`；验证脚本和 reference backend 不再维护 `eager` 作为并行基线或 fallback。
 
 ## 目录分层
 
@@ -40,9 +41,10 @@
 
 ## 当前阶段说明
 
-- 当前仓库已经具备 layer0 级别的 reference wrapper 与 host 侧验证路径。
-- 这些 reference wrapper 的职责是固定单层数学口径，不是最终 RTL 接口。
-- 下一步实现会切到 `descriptor + DDR/AXI + 1 MB SRAM working-set` 的边界上，避免继续扩展 layer-specific 参数表。
-- decode 和 prefill 都已经有 top-level wrapper 骨架，host 侧也增加了 descriptor/layout 校验脚本，用于锁定多层复用和地址空间口径。
+- 当前仓库已经具备 `sdpa-only` 的整网 reference/validator 约束，manual/descriptor/full-model 验证入口会显式报告 backend 语义。
+- layer0 reference wrapper 的职责是固定单层数学口径，不是最终 RTL 接口，也不再被视为“真实计算路径”。
+- decode attention/MLP/top-wrapper 已有真实计算路径；prefill attention 现已补上第一版真实 QKV/RoPE/cache/causal softmax 路径，并通过 host smoke。
+- prefill MLP 和 prefill top-wrapper 仍是后续缺口；下一步实现会继续切到 `descriptor + DDR/AXI + 1 MB SRAM working-set` 的边界上，避免继续扩展 layer-specific 参数表。
+- host 侧回归现在同时覆盖 descriptor/layout 校验、prefill attention smoke 和 decode 路径 smoke/regression，用于锁定多层复用和地址空间口径。
 
 详细计划见 `docs/project_plan.md`。

@@ -4,9 +4,9 @@ from dataclasses import dataclass
 from typing import Dict
 
 import torch
-from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS, apply_rotary_pos_emb, eager_attention_forward, repeat_kv
+from transformers.models.qwen2.modeling_qwen2 import ALL_ATTENTION_FUNCTIONS, apply_rotary_pos_emb, repeat_kv
 
-from torch_reference_backend import TorchReferenceBackend
+from torch_reference_backend import SDPA_ATTENTION_BACKEND, TorchReferenceBackend, get_attention_backend
 
 
 @dataclass
@@ -57,6 +57,11 @@ class Layer0PrefillReferenceBackend:
         self.attn = self.layer.self_attn
 
     def run(self, layer0_input: torch.Tensor) -> Layer0PrefillOutputs:
+        attention_backend = get_attention_backend(self.model)
+        if attention_backend != SDPA_ATTENTION_BACKEND:
+            raise AssertionError(
+                f"Layer0PrefillReferenceBackend requires attention backend '{SDPA_ATTENTION_BACKEND}', got '{attention_backend}'."
+            )
         model_dtype = self.layer.input_layernorm.weight.dtype
         layer0_input = layer0_input.to(model_dtype)
         seq_len = layer0_input.shape[1]
@@ -84,15 +89,11 @@ class Layer0PrefillReferenceBackend:
 
             get_interface = getattr(ALL_ATTENTION_FUNCTIONS, "get_interface", None)
             if get_interface is not None:
-                attention_interface = get_interface(
-                    self.attn.config._attn_implementation,
-                    eager_attention_forward,
-                )
+                attention_interface = get_interface(attention_backend)
             else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS.get(
-                    self.attn.config._attn_implementation,
-                    eager_attention_forward,
-                )
+                attention_interface = ALL_ATTENTION_FUNCTIONS.get(attention_backend)
+            if attention_interface is None:
+                raise AssertionError(f"Attention backend '{attention_backend}' is unavailable.")
             attn_output, attn_probs = attention_interface(
                 self.attn,
                 q_states,
