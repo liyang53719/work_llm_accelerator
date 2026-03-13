@@ -1,6 +1,12 @@
 #pragma once
 
-#include <cstdint>
+#include <stdint.h>
+
+namespace std {
+using ::int8_t;
+using ::int32_t;
+using ::uint8_t;
+}
 
 namespace llm_accel {
 

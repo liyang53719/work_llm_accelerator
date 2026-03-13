@@ -1,7 +1,12 @@
 #pragma once
 
-#include <cstddef>
-#include <cstdint>
+#include <stddef.h>
+#include <stdint.h>
+
+namespace std {
+using ::size_t;
+using ::uint64_t;
+}
 
 #include "qwen2_model_config.h"
 

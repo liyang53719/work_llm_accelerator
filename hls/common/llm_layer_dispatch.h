@@ -1,6 +1,11 @@
 #pragma once
 
-#include <cstdint>
+#include <stdint.h>
+
+namespace std {
+using ::uint8_t;
+using ::uint64_t;
+}
 
 #include "llm_accel_types.h"
 #include "qwen2_model_config.h"
