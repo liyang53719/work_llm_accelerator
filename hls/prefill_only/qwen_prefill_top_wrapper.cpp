@@ -55,6 +55,9 @@ KernelStatus qwen_prefill_top_wrapper(
       weight_ptr(ports.weight_ddr, descriptor.layer_weights_base_addr + layout.v_weight_offset_bytes);
   const packed_w4_t* o_weights =
       weight_ptr(ports.weight_ddr, descriptor.layer_weights_base_addr + layout.o_weight_offset_bytes);
+    const scalar_t* q_bias = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.q_bias_offset_bytes);
+    const scalar_t* k_bias = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.k_bias_offset_bytes);
+    const scalar_t* v_bias = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.v_bias_offset_bytes);
 
   const scalar_t* q_scales = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.q_scale_offset_bytes);
   const scalar_t* k_scales = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.k_scale_offset_bytes);
@@ -83,6 +86,9 @@ KernelStatus qwen_prefill_top_wrapper(
       k_weights,
       v_weights,
       o_weights,
+      q_bias,
+      k_bias,
+      v_bias,
       q_scales,
       k_scales,
       v_scales,

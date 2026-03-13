@@ -62,6 +62,7 @@ float dequantized_weight(
 void project_tiled(
     const llm_accel::scalar_t* input_token,
     const llm_accel::packed_w4_t* packed_weights,
+  const llm_accel::scalar_t* bias,
     const llm_accel::scalar_t* scales,
     int out_dim,
     llm_accel::scalar_t* output) {
@@ -70,7 +71,9 @@ void project_tiled(
 
   for (int out_base = 0; out_base < out_dim; out_base += llm_accel::kTileN) {
     const int out_extent = std::min(llm_accel::kTileN, out_dim - out_base);
-    partial_sum.fill(0.0f);
+    for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+      partial_sum[out_offset] = bias == nullptr ? 0.0f : bias[out_base + out_offset];
+    }
 
     for (int in_base = 0; in_base < llm_accel::kHiddenSize; in_base += llm_accel::kTileN) {
       const int in_extent = std::min(llm_accel::kTileN, llm_accel::kHiddenSize - in_base);
@@ -171,6 +174,9 @@ KernelStatus qwen_decode_attention_kernel(
     const packed_w4_t* k_packed_weights,
     const packed_w4_t* v_packed_weights,
     const packed_w4_t* o_packed_weights,
+    const scalar_t* q_bias,
+    const scalar_t* k_bias,
+    const scalar_t* v_bias,
     const scalar_t* q_scales,
     const scalar_t* k_scales,
     const scalar_t* v_scales,
@@ -179,9 +185,10 @@ KernelStatus qwen_decode_attention_kernel(
     scalar_t* v_cache,
     scalar_t* output_token) {
   if (input_token == nullptr || output_token == nullptr || past_seq_len < 0 || input_layernorm_weight == nullptr ||
-      q_packed_weights == nullptr ||
-      k_packed_weights == nullptr || v_packed_weights == nullptr || o_packed_weights == nullptr || q_scales == nullptr ||
-      k_scales == nullptr || v_scales == nullptr || o_scales == nullptr || k_cache == nullptr || v_cache == nullptr) {
+      q_packed_weights == nullptr || k_packed_weights == nullptr || v_packed_weights == nullptr ||
+      o_packed_weights == nullptr || q_bias == nullptr || k_bias == nullptr || v_bias == nullptr ||
+      q_scales == nullptr || k_scales == nullptr || v_scales == nullptr || o_scales == nullptr ||
+      k_cache == nullptr || v_cache == nullptr) {
     return {false, 1};
   }
 
@@ -192,9 +199,9 @@ KernelStatus qwen_decode_attention_kernel(
   std::array<scalar_t, kHiddenSize> context{};
 
   rmsnorm_token(input_token, input_layernorm_weight, rms_eps, input_norm.data());
-  project_tiled(input_norm.data(), q_packed_weights, q_scales, kHiddenSize, q_proj.data());
-  project_tiled(input_norm.data(), k_packed_weights, k_scales, kKvWidth, k_proj.data());
-  project_tiled(input_norm.data(), v_packed_weights, v_scales, kKvWidth, v_proj.data());
+  project_tiled(input_norm.data(), q_packed_weights, q_bias, q_scales, kHiddenSize, q_proj.data());
+  project_tiled(input_norm.data(), k_packed_weights, k_bias, k_scales, kKvWidth, k_proj.data());
+  project_tiled(input_norm.data(), v_packed_weights, v_bias, v_scales, kKvWidth, v_proj.data());
 
   for (int head = 0; head < kNumAttentionHeads; ++head) {
     apply_rope_inplace(q_proj.data() + head * kHeadDim, past_seq_len);
@@ -205,7 +212,7 @@ KernelStatus qwen_decode_attention_kernel(
 
   append_kv_cache(k_proj.data(), v_proj.data(), past_seq_len, k_cache, v_cache);
   decode_attention_context(q_proj.data(), k_cache, v_cache, past_seq_len + 1, context.data());
-  project_tiled(context.data(), o_packed_weights, o_scales, kHiddenSize, output_token);
+  project_tiled(context.data(), o_packed_weights, nullptr, o_scales, kHiddenSize, output_token);
 
   return {true, 0};
 }

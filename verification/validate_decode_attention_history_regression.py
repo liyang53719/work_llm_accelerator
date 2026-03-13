@@ -32,7 +32,7 @@ def set_packed_weight(packed: np.ndarray, out_dim: int, in_dim: int, out_index: 
         packed[byte_index] = (packed[byte_index] & 0x0F) | (nibble << 4)
 
 
-def build_case() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+def build_case() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     input_token = np.zeros(HIDDEN_SIZE, dtype=np.float32)
     input_token[0] = 1.0
     input_token[1] = -0.75
@@ -64,6 +64,9 @@ def build_case() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.nda
     k_scales = np.ones(KV_WIDTH, dtype=np.float32)
     v_scales = np.ones(KV_WIDTH, dtype=np.float32)
     o_scales = np.ones(HIDDEN_SIZE, dtype=np.float32)
+    q_bias = np.zeros(HIDDEN_SIZE, dtype=np.float32)
+    k_bias = np.zeros(KV_WIDTH, dtype=np.float32)
+    v_bias = np.zeros(KV_WIDTH, dtype=np.float32)
 
     k_cache = np.zeros(KV_WIDTH * 3, dtype=np.float32)
     v_cache = np.zeros(KV_WIDTH * 3, dtype=np.float32)
@@ -72,7 +75,7 @@ def build_case() -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.nda
         k_cache[token * KV_WIDTH + HEAD_DIM] = -0.5 * (token + 1)
         v_cache[token * KV_WIDTH + 0] = 1.25 * (token + 1)
         v_cache[token * KV_WIDTH + HEAD_DIM] = -1.5 * (token + 1)
-    return input_token, input_layernorm_weight, q_weights, k_weights, v_weights, o_weights, q_scales, k_scales, v_scales, o_scales, k_cache, v_cache
+    return input_token, input_layernorm_weight, q_weights, k_weights, v_weights, o_weights, q_bias, k_bias, v_bias, q_scales, k_scales, v_scales, o_scales, k_cache, v_cache
 
 
 def decode_int4_matrix(packed: np.ndarray, out_dim: int, in_dim: int, scales: np.ndarray) -> np.ndarray:
@@ -107,6 +110,9 @@ def reference_decode(
     k_weights: np.ndarray,
     v_weights: np.ndarray,
     o_weights: np.ndarray,
+    q_bias: np.ndarray,
+    k_bias: np.ndarray,
+    v_bias: np.ndarray,
     q_scales: np.ndarray,
     k_scales: np.ndarray,
     v_scales: np.ndarray,
@@ -121,9 +127,9 @@ def reference_decode(
     v_matrix = decode_int4_matrix(v_weights, KV_WIDTH, HIDDEN_SIZE, v_scales)
     o_matrix = decode_int4_matrix(o_weights, HIDDEN_SIZE, HIDDEN_SIZE, o_scales)
 
-    q_proj = q_matrix @ norm
-    k_proj = k_matrix @ norm
-    v_proj = v_matrix @ norm
+    q_proj = q_matrix @ norm + q_bias
+    k_proj = k_matrix @ norm + k_bias
+    v_proj = v_matrix @ norm + v_bias
     for head in range(NUM_HEADS):
         q_proj[head * HEAD_DIM : (head + 1) * HEAD_DIM] = apply_rope(q_proj[head * HEAD_DIM : (head + 1) * HEAD_DIM], past_seq_len)
     for kv_head in range(NUM_KV_HEADS):
@@ -169,6 +175,9 @@ def main() -> None:
         k_weights,
         v_weights,
         o_weights,
+        q_bias,
+        k_bias,
+        v_bias,
         q_scales,
         k_scales,
         v_scales,
@@ -184,6 +193,9 @@ def main() -> None:
         k_weights,
         v_weights,
         o_weights,
+        q_bias,
+        k_bias,
+        v_bias,
         q_scales,
         k_scales,
         v_scales,
@@ -212,6 +224,9 @@ def main() -> None:
         float_ptr,
         float_ptr,
         float_ptr,
+        float_ptr,
+        float_ptr,
+        float_ptr,
     ]
     func.restype = ctypes.c_int
 
@@ -226,6 +241,9 @@ def main() -> None:
         k_weights,
         v_weights,
         o_weights,
+        q_bias,
+        k_bias,
+        v_bias,
         q_scales,
         k_scales,
         v_scales,

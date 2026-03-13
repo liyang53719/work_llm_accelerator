@@ -36,8 +36,11 @@ constexpr std::size_t kDownWeightBytes =
 constexpr std::size_t kProjectionScaleBytesPerLayer =
     static_cast<std::size_t>(3 * kHiddenSize + kIntermediateSize + kHiddenSize) * sizeof(float);
 
+constexpr std::size_t kProjectionBiasBytesPerLayer =
+  static_cast<std::size_t>(kHiddenSize + 2 * kNumKeyValueHeads * kHeadDim) * sizeof(float);
+
 constexpr std::size_t kLayerParameterBytes =
-    kPackedWeightBytesPerLayer + kNormWeightBytesPerLayer + kProjectionScaleBytesPerLayer;
+  kPackedWeightBytesPerLayer + kNormWeightBytesPerLayer + kProjectionBiasBytesPerLayer + kProjectionScaleBytesPerLayer;
 
 constexpr std::size_t kKvElementsPerTokenPerLayer =
     static_cast<std::size_t>(2 * kNumKeyValueHeads * kHeadDim);
@@ -54,6 +57,9 @@ struct LayerParameterLayout {
   std::uint64_t gate_weight_offset_bytes;
   std::uint64_t up_weight_offset_bytes;
   std::uint64_t down_weight_offset_bytes;
+  std::uint64_t q_bias_offset_bytes;
+  std::uint64_t k_bias_offset_bytes;
+  std::uint64_t v_bias_offset_bytes;
   std::uint64_t q_scale_offset_bytes;
   std::uint64_t k_scale_offset_bytes;
   std::uint64_t v_scale_offset_bytes;
@@ -92,6 +98,12 @@ constexpr LayerParameterLayout default_layer_parameter_layout() {
   offset += static_cast<std::uint64_t>(kUpWeightBytes);
   layout.down_weight_offset_bytes = offset;
   offset += static_cast<std::uint64_t>(kDownWeightBytes);
+  layout.q_bias_offset_bytes = offset;
+  offset += static_cast<std::uint64_t>(kHiddenSize * sizeof(float));
+  layout.k_bias_offset_bytes = offset;
+  offset += static_cast<std::uint64_t>(kNumKeyValueHeads * kHeadDim * sizeof(float));
+  layout.v_bias_offset_bytes = offset;
+  offset += static_cast<std::uint64_t>(kNumKeyValueHeads * kHeadDim * sizeof(float));
 
   layout.q_scale_offset_bytes = offset;
   offset += static_cast<std::uint64_t>(kHiddenSize * sizeof(float));

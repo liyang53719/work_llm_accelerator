@@ -71,7 +71,7 @@ def main() -> None:
     o_view = weight_ddr[layout.o_weight_offset_bytes : layout.post_attention_layernorm_weight_offset_bytes]
     gate_view = weight_ddr[layout.gate_weight_offset_bytes : layout.up_weight_offset_bytes]
     up_view = weight_ddr[layout.up_weight_offset_bytes : layout.down_weight_offset_bytes]
-    down_view = weight_ddr[layout.down_weight_offset_bytes : layout.q_scale_offset_bytes]
+    down_view = weight_ddr[layout.down_weight_offset_bytes : layout.q_bias_offset_bytes]
     set_packed_weight(q_view, HIDDEN_SIZE, HIDDEN_SIZE, 0, 0, 1)
     set_packed_weight(q_view, HIDDEN_SIZE, HIDDEN_SIZE, 128, 1, -1)
     set_packed_weight(k_view, KV_WIDTH, HIDDEN_SIZE, 0, 0, 1)
@@ -89,6 +89,9 @@ def main() -> None:
     scale_ddr[
         layout.post_attention_layernorm_weight_offset_bytes // 4 : layout.post_attention_layernorm_weight_offset_bytes // 4 + HIDDEN_SIZE
     ] = input_layernorm_weight
+    scale_ddr[layout.q_bias_offset_bytes // 4 : layout.q_bias_offset_bytes // 4 + HIDDEN_SIZE] = 0.0
+    scale_ddr[layout.k_bias_offset_bytes // 4 : layout.k_bias_offset_bytes // 4 + KV_WIDTH] = 0.0
+    scale_ddr[layout.v_bias_offset_bytes // 4 : layout.v_bias_offset_bytes // 4 + KV_WIDTH] = 0.0
     scale_ddr[layout.q_scale_offset_bytes // 4 : layout.q_scale_offset_bytes // 4 + HIDDEN_SIZE] = 1.0
     scale_ddr[layout.k_scale_offset_bytes // 4 : layout.k_scale_offset_bytes // 4 + KV_WIDTH] = 1.0
     scale_ddr[layout.v_scale_offset_bytes // 4 : layout.v_scale_offset_bytes // 4 + KV_WIDTH] = 1.0
@@ -138,6 +141,9 @@ def main() -> None:
         float_ptr,
         float_ptr,
         float_ptr,
+        float_ptr,
+        float_ptr,
+        float_ptr,
     ]
     direct_func.restype = ctypes.c_int
 
@@ -175,6 +181,9 @@ def main() -> None:
         gate_view,
         up_view,
         down_view,
+        scale_ddr[layout.q_bias_offset_bytes // 4 : layout.q_bias_offset_bytes // 4 + HIDDEN_SIZE],
+        scale_ddr[layout.k_bias_offset_bytes // 4 : layout.k_bias_offset_bytes // 4 + KV_WIDTH],
+        scale_ddr[layout.v_bias_offset_bytes // 4 : layout.v_bias_offset_bytes // 4 + KV_WIDTH],
         scale_ddr[layout.q_scale_offset_bytes // 4 : layout.q_scale_offset_bytes // 4 + HIDDEN_SIZE],
         scale_ddr[layout.k_scale_offset_bytes // 4 : layout.k_scale_offset_bytes // 4 + KV_WIDTH],
         scale_ddr[layout.v_scale_offset_bytes // 4 : layout.v_scale_offset_bytes // 4 + KV_WIDTH],

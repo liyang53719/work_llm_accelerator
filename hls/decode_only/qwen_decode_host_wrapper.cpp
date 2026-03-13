@@ -25,6 +25,9 @@ extern "C" int qwen_decode_stub_forward(
     std::vector<packed_w4_t> k_weights(static_cast<std::size_t>(kHiddenSize) * kNumKeyValueHeads * kHeadDim / 2, 0);
     std::vector<packed_w4_t> v_weights(static_cast<std::size_t>(kHiddenSize) * kNumKeyValueHeads * kHeadDim / 2, 0);
     std::vector<packed_w4_t> o_weights(static_cast<std::size_t>(kHiddenSize) * kHiddenSize / 2, 0);
+    std::vector<float> q_bias(kHiddenSize, 0.0f);
+    std::vector<float> k_bias(kNumKeyValueHeads * kHeadDim, 0.0f);
+    std::vector<float> v_bias(kNumKeyValueHeads * kHeadDim, 0.0f);
     std::vector<float> q_scales(kHiddenSize, 1.0f);
     std::vector<float> k_scales(kNumKeyValueHeads * kHeadDim, 1.0f);
     std::vector<float> v_scales(kNumKeyValueHeads * kHeadDim, 1.0f);
@@ -39,6 +42,9 @@ extern "C" int qwen_decode_stub_forward(
       k_weights.data(),
       v_weights.data(),
       o_weights.data(),
+      q_bias.data(),
+      k_bias.data(),
+      v_bias.data(),
       q_scales.data(),
       k_scales.data(),
       v_scales.data(),
@@ -72,6 +78,9 @@ extern "C" int qwen_decode_attention_smoke_forward(
     const std::uint8_t* k_packed_weights,
     const std::uint8_t* v_packed_weights,
     const std::uint8_t* o_packed_weights,
+    const float* q_bias,
+    const float* k_bias,
+    const float* v_bias,
     const float* q_scales,
     const float* k_scales,
     const float* v_scales,
@@ -88,6 +97,9 @@ extern "C" int qwen_decode_attention_smoke_forward(
       k_packed_weights,
       v_packed_weights,
       o_packed_weights,
+      q_bias,
+      k_bias,
+      v_bias,
       q_scales,
       k_scales,
       v_scales,
@@ -154,6 +166,9 @@ extern "C" int qwen_decode_layer_smoke_forward(
     const std::uint8_t* gate_packed_weights,
     const std::uint8_t* up_packed_weights,
     const std::uint8_t* down_packed_weights,
+    const float* q_bias,
+    const float* k_bias,
+    const float* v_bias,
     const float* q_scales,
     const float* k_scales,
     const float* v_scales,
@@ -174,6 +189,9 @@ extern "C" int qwen_decode_layer_smoke_forward(
       k_packed_weights,
       v_packed_weights,
       o_packed_weights,
+      q_bias,
+      k_bias,
+      v_bias,
       q_scales,
       k_scales,
       v_scales,

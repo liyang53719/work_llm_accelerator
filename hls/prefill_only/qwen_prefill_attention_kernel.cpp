@@ -62,6 +62,7 @@ float dequantized_weight(
 void project_tiled_token(
     const llm_accel::scalar_t* input_token,
     const llm_accel::packed_w4_t* packed_weights,
+  const llm_accel::scalar_t* bias,
     const llm_accel::scalar_t* scales,
     int out_dim,
     int in_dim,
@@ -71,7 +72,9 @@ void project_tiled_token(
 
   for (int out_base = 0; out_base < out_dim; out_base += llm_accel::kTileN) {
     const int out_extent = std::min(llm_accel::kTileN, out_dim - out_base);
-    partial_sum.fill(0.0f);
+    for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+      partial_sum[out_offset] = bias == nullptr ? 0.0f : bias[out_base + out_offset];
+    }
 
     for (int in_base = 0; in_base < in_dim; in_base += llm_accel::kTileN) {
       const int in_extent = std::min(llm_accel::kTileN, in_dim - in_base);
@@ -167,6 +170,9 @@ KernelStatus qwen_prefill_attention_kernel(
     const packed_w4_t* k_packed_weights,
     const packed_w4_t* v_packed_weights,
     const packed_w4_t* o_packed_weights,
+    const scalar_t* q_bias,
+    const scalar_t* k_bias,
+    const scalar_t* v_bias,
     const scalar_t* q_scales,
     const scalar_t* k_scales,
     const scalar_t* v_scales,
@@ -176,7 +182,8 @@ KernelStatus qwen_prefill_attention_kernel(
     scalar_t* output_sequence) {
   if (input_sequence == nullptr || output_sequence == nullptr || seq_len <= 0 || tile_m <= 0 ||
       input_layernorm_weight == nullptr || q_packed_weights == nullptr || k_packed_weights == nullptr ||
-      v_packed_weights == nullptr || o_packed_weights == nullptr || q_scales == nullptr || k_scales == nullptr ||
+      v_packed_weights == nullptr || o_packed_weights == nullptr || q_bias == nullptr || k_bias == nullptr ||
+      v_bias == nullptr || q_scales == nullptr || k_scales == nullptr ||
       v_scales == nullptr || o_scales == nullptr || k_cache == nullptr || v_cache == nullptr) {
     return {false, 1};
   }
@@ -195,9 +202,9 @@ KernelStatus qwen_prefill_attention_kernel(
     scalar_t* v_proj_token = v_proj.data() + static_cast<std::size_t>(token_index) * kKvWidth;
 
     rmsnorm_token(input_token, input_layernorm_weight, rms_eps, input_norm_token);
-    project_tiled_token(input_norm_token, q_packed_weights, q_scales, kHiddenSize, kHiddenSize, q_proj_token);
-    project_tiled_token(input_norm_token, k_packed_weights, k_scales, kKvWidth, kHiddenSize, k_proj_token);
-    project_tiled_token(input_norm_token, v_packed_weights, v_scales, kKvWidth, kHiddenSize, v_proj_token);
+    project_tiled_token(input_norm_token, q_packed_weights, q_bias, q_scales, kHiddenSize, kHiddenSize, q_proj_token);
+    project_tiled_token(input_norm_token, k_packed_weights, k_bias, k_scales, kKvWidth, kHiddenSize, k_proj_token);
+    project_tiled_token(input_norm_token, v_packed_weights, v_bias, v_scales, kKvWidth, kHiddenSize, v_proj_token);
 
     for (int head = 0; head < kNumAttentionHeads; ++head) {
       apply_rope_inplace(q_proj_token + head * kHeadDim, token_index);
@@ -220,7 +227,7 @@ KernelStatus qwen_prefill_attention_kernel(
   for (int token_index = 0; token_index < seq_len; ++token_index) {
     const scalar_t* context_token = context.data() + static_cast<std::size_t>(token_index) * kHiddenSize;
     scalar_t* output_token = output_sequence + static_cast<std::size_t>(token_index) * kHiddenSize;
-    project_tiled_token(context_token, o_packed_weights, o_scales, kHiddenSize, kHiddenSize, output_token);
+    project_tiled_token(context_token, o_packed_weights, nullptr, o_scales, kHiddenSize, kHiddenSize, output_token);
   }
 
   return {true, 0};

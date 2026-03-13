@@ -125,6 +125,9 @@ def main() -> None:
     k_scales = np.ones(KV_WIDTH, dtype=np.float32)
     v_scales = np.ones(KV_WIDTH, dtype=np.float32)
     o_scales = np.ones(HIDDEN_SIZE, dtype=np.float32)
+    q_bias = np.zeros(HIDDEN_SIZE, dtype=np.float32)
+    k_bias = np.zeros(KV_WIDTH, dtype=np.float32)
+    v_bias = np.zeros(KV_WIDTH, dtype=np.float32)
     k_cache = np.zeros(args.seq_len * KV_WIDTH, dtype=np.float32)
     v_cache = np.zeros(args.seq_len * KV_WIDTH, dtype=np.float32)
     output_sequence = np.zeros(args.seq_len * HIDDEN_SIZE, dtype=np.float32)
@@ -149,6 +152,9 @@ def main() -> None:
         float_ptr,
         float_ptr,
         float_ptr,
+        float_ptr,
+        float_ptr,
+        float_ptr,
     ]
     func.restype = ctypes.c_int
 
@@ -161,6 +167,9 @@ def main() -> None:
         k_weights,
         v_weights,
         o_weights,
+        q_bias,
+        k_bias,
+        v_bias,
         q_scales,
         k_scales,
         v_scales,

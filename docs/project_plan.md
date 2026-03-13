@@ -174,6 +174,12 @@
 - decode 侧当前已有真实 attention/MLP/top-wrapper 路径；prefill 侧现在也具备 attention/MLP/top-wrapper 的完整层路径，并有独立 smoke/regression。
 - 当前整网 validator 已补入 `real-host-top` backend，用 per-output-channel INT4 量化后的 top-wrapper 路径覆盖完整 prefill + decode；因此下一阶段缺口从“接入 host backend”转为“收紧量化误差口径并推进 AXI/SRAM/Catapult”。
 
+## 8.2 下一步规划
+
+- `real-host-top` 已补齐 attention 的 `q_proj/k_proj/v_proj` bias 路径，并通过 host regression suite 与整网 validator 回归；当前误差口径已从此前以 K-cache 为主的约 `317` 级别，收敛到 logits 约 `21` 到 `23`、cache 约 `18.8` 的范围。
+- 下一步先继续收紧 INT4 top-wrapper 的数值口径，优先排查剩余 logits 偏差来自 `o_proj` 累加链、norm/rope 边界还是量化尺度设计，而不是继续扩大功能面。
+- 在数值口径稳定后，把 `real-host-top` 作为“接近硬件行为的软件验证基线”，再推进真正的 AXI/SRAM/top-level 接口固化与 Catapult architect 探索；RTL 生成主线仍应落在 HLS kernel/top-level 实现本身，而不是把 `real-host-top` 直接当作 RTL 分支。
+
 ## 9. 关键风险
 
 - 1 MB SRAM 对 prefill 的限制比 decode 更严，attention 中间态和 softmax scratch 很可能先成为主瓶颈。

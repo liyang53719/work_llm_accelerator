@@ -24,6 +24,9 @@ class LayerParameterLayout:
     gate_weight_offset_bytes: int
     up_weight_offset_bytes: int
     down_weight_offset_bytes: int
+    q_bias_offset_bytes: int
+    k_bias_offset_bytes: int
+    v_bias_offset_bytes: int
     q_scale_offset_bytes: int
     k_scale_offset_bytes: int
     v_scale_offset_bytes: int
@@ -98,6 +101,12 @@ def build_layer_parameter_layout(spec: QwenModelSpec) -> LayerParameterLayout:
     offset += up_weight_bytes
     down_weight_offset_bytes = offset
     offset += down_weight_bytes
+    q_bias_offset_bytes = offset
+    offset += spec.hidden_size * 4
+    k_bias_offset_bytes = offset
+    offset += k_width * 4
+    v_bias_offset_bytes = offset
+    offset += k_width * 4
     q_scale_offset_bytes = offset
     offset += spec.hidden_size * 4
     k_scale_offset_bytes = offset
@@ -123,6 +132,9 @@ def build_layer_parameter_layout(spec: QwenModelSpec) -> LayerParameterLayout:
         gate_weight_offset_bytes=gate_weight_offset_bytes,
         up_weight_offset_bytes=up_weight_offset_bytes,
         down_weight_offset_bytes=down_weight_offset_bytes,
+        q_bias_offset_bytes=q_bias_offset_bytes,
+        k_bias_offset_bytes=k_bias_offset_bytes,
+        v_bias_offset_bytes=v_bias_offset_bytes,
         q_scale_offset_bytes=q_scale_offset_bytes,
         k_scale_offset_bytes=k_scale_offset_bytes,
         v_scale_offset_bytes=v_scale_offset_bytes,
