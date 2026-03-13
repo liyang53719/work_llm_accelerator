@@ -1,12 +1,6 @@
 #pragma once
 
-#include <stdint.h>
-
-namespace std {
-using ::int8_t;
-using ::int32_t;
-using ::uint8_t;
-}
+#include "../catapult_shims/cstdint.h"
 
 namespace llm_accel {
 

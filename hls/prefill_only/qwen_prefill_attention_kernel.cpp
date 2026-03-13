@@ -1,9 +1,9 @@
 #include "qwen_prefill_attention_kernel.h"
 
 #ifdef __SYNTHESIS__
-#include <ac_int.h>
-#include <ac_std_float.h>
-#include <ccs_dw_fp_lib.h>
+#include "../ac_int.h"
+#include "../ac_std_float.h"
+#include "../ccs_dw_fp_lib.h"
 #endif
 
 namespace {
@@ -423,30 +423,14 @@ void approx_sincos_fp(const catapult_fp_t& angle, catapult_fp_t* sin_value, cata
   }
 
   const catapult_fp_t x2 = fp_mul_op(reduced, reduced);
-  const catapult_fp_t sin_poly = fp_mul_op(
-      reduced,
-      fp_add_op(
-          fp_one(),
-          fp_mul_op(
-              x2,
-              fp_add_op(
-                  fp_const(-1.0f / 6.0f),
-                  fp_mul_op(
-                      x2,
-                      fp_add_op(
-                          fp_const(1.0f / 120.0f),
-                          fp_mul_op(x2, fp_const(-1.0f / 5040.0f)))))))));
-  const catapult_fp_t cos_poly = fp_add_op(
-      fp_one(),
-      fp_mul_op(
-          x2,
-          fp_add_op(
-              fp_const(-0.5f),
-              fp_mul_op(
-                  x2,
-                  fp_add_op(
-                      fp_const(1.0f / 24.0f),
-                      fp_mul_op(x2, fp_const(-1.0f / 720.0f)))))));
+    const catapult_fp_t sin_tail = fp_add_op(fp_const(1.0f / 120.0f), fp_mul_op(x2, fp_const(-1.0f / 5040.0f)));
+    const catapult_fp_t sin_mid = fp_add_op(fp_const(-1.0f / 6.0f), fp_mul_op(x2, sin_tail));
+    const catapult_fp_t sin_scale = fp_add_op(fp_one(), fp_mul_op(x2, sin_mid));
+    const catapult_fp_t sin_poly = fp_mul_op(reduced, sin_scale);
+
+    const catapult_fp_t cos_tail = fp_add_op(fp_const(1.0f / 24.0f), fp_mul_op(x2, fp_const(-1.0f / 720.0f)));
+    const catapult_fp_t cos_mid = fp_add_op(fp_const(-0.5f), fp_mul_op(x2, cos_tail));
+    const catapult_fp_t cos_poly = fp_add_op(fp_one(), fp_mul_op(x2, cos_mid));
   *sin_value = sin_poly;
   *cos_value = fp_mul_op(cos_sign, cos_poly);
 }
@@ -776,31 +760,26 @@ KernelStatus qwen_prefill_attention_kernel(
 
 #pragma hls_design top
 KernelStatus qwen_prefill_attention_kernel_catapult(
-    const catapult_fp_t* input_sequence,
+    const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
-    const catapult_fp_t* input_layernorm_weight,
+    const catapult_fp_t input_layernorm_weight[kHiddenSize],
     catapult_fp_t rms_eps,
-    const packed_w4_t* q_packed_weights,
-    const packed_w4_t* k_packed_weights,
-    const packed_w4_t* v_packed_weights,
-    const packed_w4_t* o_packed_weights,
-    const catapult_fp_t* q_bias,
-    const catapult_fp_t* k_bias,
-    const catapult_fp_t* v_bias,
-    const catapult_fp_t* q_scales,
-    const catapult_fp_t* k_scales,
-    const catapult_fp_t* v_scales,
-    const catapult_fp_t* o_scales,
-    catapult_fp_t* k_cache,
-    catapult_fp_t* v_cache,
-    catapult_fp_t* output_sequence) {
-  if (input_sequence == nullptr || output_sequence == nullptr || seq_len <= 0 ||
-      input_layernorm_weight == nullptr || q_packed_weights == nullptr || k_packed_weights == nullptr ||
-      v_packed_weights == nullptr || o_packed_weights == nullptr || q_bias == nullptr || k_bias == nullptr ||
-      v_bias == nullptr || q_scales == nullptr || k_scales == nullptr ||
-      v_scales == nullptr || o_scales == nullptr || k_cache == nullptr || v_cache == nullptr ||
-      tile_config.seq <= 0 || tile_config.query <= 0 || tile_config.key <= 0 || tile_config.hidden_proj <= 0 ||
+    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const packed_w4_t k_packed_weights[kKvWidth * kHiddenSize / 2],
+    const packed_w4_t v_packed_weights[kKvWidth * kHiddenSize / 2],
+    const packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const catapult_fp_t q_bias[kHiddenSize],
+    const catapult_fp_t k_bias[kKvWidth],
+    const catapult_fp_t v_bias[kKvWidth],
+    const catapult_fp_t q_scales[kHiddenSize],
+    const catapult_fp_t k_scales[kKvWidth],
+    const catapult_fp_t v_scales[kKvWidth],
+    const catapult_fp_t o_scales[kHiddenSize],
+    catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth],
+    catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth],
+    catapult_fp_t output_sequence[kPrefillSeqCapacity * kHiddenSize]) {
+  if (seq_len <= 0 || tile_config.seq <= 0 || tile_config.query <= 0 || tile_config.key <= 0 || tile_config.hidden_proj <= 0 ||
       tile_config.kv_proj <= 0 || tile_config.head_dim != kHeadDim || tile_config.query_heads_parallel <= 0 ||
       tile_config.kv_heads_parallel <= 0) {
     return {false, 1};

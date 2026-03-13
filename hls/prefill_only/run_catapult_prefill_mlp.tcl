@@ -31,9 +31,9 @@ set search_path [join [list \
 	[file join $project_root catapult_shims] \
 	$project_root \
 	$mgc_home/shared/include \
-	/usr/include/c++/10 \
-	/usr/include/x86_64-linux-gnu/c++/10 \
-	/usr/lib/gcc/x86_64-linux-gnu/10/include \
+	[file join $gcc_root include c++ 10.3.0] \
+	[file join $gcc_root include c++ 10.3.0 x86_64-linux-gnu] \
+	[file join $gcc_root lib gcc x86_64-linux-gnu 10.3.0 include] \
 	/usr/include \
 	/usr/include/x86_64-linux-gnu] " "]
 
@@ -43,9 +43,14 @@ set compiler_flags [list \
 	"-I[file join $project_root catapult_shims]" \
 	"-I$project_root" \
 	"-I$mgc_home/shared/include" \
-	"-I/usr/include/c++/10" \
-	"-I/usr/include/x86_64-linux-gnu/c++/10" \
-	"-I/usr/lib/gcc/x86_64-linux-gnu/10/include" \
+	"-include limits.h" \
+	"-include climits" \
+	"-D_GCC_LIMITS_H_" \
+	"-D_LIBC_LIMITS_H_" \
+	"-D__EDG__" \
+	"-I[file join $gcc_root include c++ 10.3.0]" \
+	"-I[file join $gcc_root include c++ 10.3.0 x86_64-linux-gnu]" \
+	"-I[file join $gcc_root lib gcc x86_64-linux-gnu 10.3.0 include]" \
 	"-I/usr/include" \
 	"-I/usr/include/x86_64-linux-gnu"]
 
@@ -72,7 +77,7 @@ options defaults
 solution new $solution_name
 solution options set /Input/SearchPath $search_path
 solution options set /Input/CompilerFlags [join $compiler_flags " "]
-solution options set /Input/CppStandard c++17
+solution options set /Input/CppStandard c++11
 solution options set /Flows/SCVerify/USE_CCS_BLOCK true
 
 project new

@@ -1,12 +1,7 @@
 #pragma once
 
-#include <stddef.h>
-#include <stdint.h>
-
-namespace std {
-using ::size_t;
-using ::uint64_t;
-}
+#include "../catapult_shims/cstddef.h"
+#include "../catapult_shims/cstdint.h"
 
 #include "qwen2_model_config.h"
 
