@@ -1,6 +1,9 @@
 #include "qwen_prefill_top_wrapper.h"
 
+#include <vector>
+
 #include "qwen_prefill_attention_kernel.h"
+#include "qwen_prefill_mlp_kernel.h"
 
 namespace llm_accel {
 namespace {
@@ -41,6 +44,8 @@ KernelStatus qwen_prefill_top_wrapper(
   scalar_t* v_cache = scalar_ptr(ports.kv_cache_ddr, descriptor.v_cache_base_addr);
   const scalar_t* input_layernorm_weight =
       scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.input_layernorm_weight_offset_bytes);
+    const scalar_t* post_attention_layernorm_weight =
+      scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.post_attention_layernorm_weight_offset_bytes);
 
   const packed_w4_t* q_weights =
       weight_ptr(ports.weight_ddr, descriptor.layer_weights_base_addr + layout.q_weight_offset_bytes);
@@ -55,8 +60,20 @@ KernelStatus qwen_prefill_top_wrapper(
   const scalar_t* k_scales = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.k_scale_offset_bytes);
   const scalar_t* v_scales = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.v_scale_offset_bytes);
   const scalar_t* o_scales = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.o_scale_offset_bytes);
+    const scalar_t* gate_scales = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.gate_scale_offset_bytes);
+    const scalar_t* up_scales = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.up_scale_offset_bytes);
+    const scalar_t* down_scales = scalar_ptr(ports.scale_ddr, descriptor.layer_scales_base_addr + layout.down_scale_offset_bytes);
 
-  return qwen_prefill_attention_kernel(
+    const packed_w4_t* gate_weights =
+      weight_ptr(ports.weight_ddr, descriptor.layer_weights_base_addr + layout.gate_weight_offset_bytes);
+    const packed_w4_t* up_weights =
+      weight_ptr(ports.weight_ddr, descriptor.layer_weights_base_addr + layout.up_weight_offset_bytes);
+    const packed_w4_t* down_weights =
+      weight_ptr(ports.weight_ddr, descriptor.layer_weights_base_addr + layout.down_weight_offset_bytes);
+
+    std::vector<scalar_t> attention_output(static_cast<std::size_t>(descriptor.seq_len) * kHiddenSize, 0.0f);
+
+    KernelStatus attention_status = qwen_prefill_attention_kernel(
       input_sequence,
       descriptor.seq_len,
       descriptor.tile_m,
@@ -72,6 +89,23 @@ KernelStatus qwen_prefill_top_wrapper(
       o_scales,
       k_cache,
       v_cache,
+      attention_output.data());
+  if (!attention_status.ok) {
+    return attention_status;
+  }
+
+  return qwen_prefill_mlp_kernel(
+      attention_output.data(),
+      descriptor.seq_len,
+      descriptor.tile_m,
+      post_attention_layernorm_weight,
+      kRmsNormEps,
+      gate_weights,
+      up_weights,
+      down_weights,
+      gate_scales,
+      up_scales,
+      down_scales,
       output_sequence);
 }
 

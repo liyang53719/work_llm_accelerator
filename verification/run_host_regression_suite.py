@@ -37,6 +37,8 @@ def main() -> None:
         [sys.executable, str(ROOT / "verification" / "validate_layer_dispatch_layout.py")],
         [sys.executable, str(ROOT / "verification" / "validate_all_layer_descriptor_dispatch.py"), "--decode-steps", "1"],
         [sys.executable, str(ROOT / "verification" / "validate_prefill_attention_smoke.py")],
+        [sys.executable, str(ROOT / "verification" / "validate_prefill_mlp_smoke.py")],
+        [sys.executable, str(ROOT / "verification" / "validate_prefill_top_wrapper_regression.py")],
         [sys.executable, str(ROOT / "verification" / "validate_decode_attention_smoke.py")],
         [sys.executable, str(ROOT / "verification" / "validate_decode_attention_history_regression.py")],
         [sys.executable, str(ROOT / "verification" / "validate_decode_mlp_smoke.py")],

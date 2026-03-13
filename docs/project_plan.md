@@ -171,8 +171,8 @@
 
 - `TorchReferenceBackend`、manual dispatch、descriptor dispatch 和 full-model validator 已统一收敛到 `sdpa-only`，启动时应显式校验当前 backend。
 - `reference wrapper` 继续作为数学金标与定位工具，不再作为“真实计算路径”的定义来源。
-- decode 侧当前已有真实 attention/MLP/top-wrapper 路径；prefill 侧已补上第一版真实 attention kernel，并具备独立 smoke validator。
-- prefill MLP 和 prefill top-wrapper regression 仍待补齐；在这两项闭合前，不进入 Catapult/RTL 交付阶段。
+- decode 侧当前已有真实 attention/MLP/top-wrapper 路径；prefill 侧现在也具备 attention/MLP/top-wrapper 的完整层路径，并有独立 smoke/regression。
+- 当前下一阶段缺口不再是 prefill 单层功能闭合，而是把 prefill 的真实层路径接到整网 backend/validator，并在此基础上推进 AXI/SRAM/Catapult。
 
 ## 9. 关键风险
 

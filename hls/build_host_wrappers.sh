@@ -9,6 +9,7 @@ mkdir -p "$OUT_DIR"
 g++ -std=c++17 -O2 -fPIC -shared \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_attention_kernel.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_mlp_kernel.cpp" \
+  "$ROOT_DIR/hls/prefill_only/qwen_prefill_top_wrapper.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_host_wrapper.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_layer0_reference_wrapper.cpp" \
   -o "$OUT_DIR/libqwen_prefill_stub.so"

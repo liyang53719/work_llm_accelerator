@@ -43,8 +43,9 @@
 
 - 当前仓库已经具备 `sdpa-only` 的整网 reference/validator 约束，manual/descriptor/full-model 验证入口会显式报告 backend 语义。
 - layer0 reference wrapper 的职责是固定单层数学口径，不是最终 RTL 接口，也不再被视为“真实计算路径”。
-- decode attention/MLP/top-wrapper 已有真实计算路径；prefill attention 现已补上第一版真实 QKV/RoPE/cache/causal softmax 路径，并通过 host smoke。
-- prefill MLP 和 prefill top-wrapper 仍是后续缺口；下一步实现会继续切到 `descriptor + DDR/AXI + 1 MB SRAM working-set` 的边界上，避免继续扩展 layer-specific 参数表。
-- host 侧回归现在同时覆盖 descriptor/layout 校验、prefill attention smoke 和 decode 路径 smoke/regression，用于锁定多层复用和地址空间口径。
+- decode attention/MLP/top-wrapper 已有真实计算路径；prefill 侧现在也具备 attention + MLP + top-wrapper 的完整层路径。
+- prefill attention、prefill MLP 和 prefill top-wrapper 都已有独立 smoke/regression，数据比对可直接走 host `.so` 完成。
+- 下一步实现会从“单层完整路径已通”推进到“prefill 整网真实路径接入统一 backend/validator”，同时继续保持 `descriptor + DDR/AXI + 1 MB SRAM working-set` 的边界，不再扩展 layer-specific 参数表。
+- host 侧回归现在同时覆盖 descriptor/layout 校验、prefill attention/MLP/top-wrapper 和 decode 路径 smoke/regression，用于锁定多层复用和地址空间口径。
 
 详细计划见 `docs/project_plan.md`。
