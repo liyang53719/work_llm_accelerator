@@ -87,11 +87,7 @@ class Layer0PrefillReferenceBackend:
             cos, sin = position_embeddings
             q_states, k_states = apply_rotary_pos_emb(q_states, k_states, cos, sin)
 
-            get_interface = getattr(ALL_ATTENTION_FUNCTIONS, "get_interface", None)
-            if get_interface is not None:
-                attention_interface = get_interface(attention_backend)
-            else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS.get(attention_backend)
+            attention_interface = ALL_ATTENTION_FUNCTIONS.get(attention_backend)
             if attention_interface is None:
                 raise AssertionError(f"Attention backend '{attention_backend}' is unavailable.")
             attn_output, attn_probs = attention_interface(
