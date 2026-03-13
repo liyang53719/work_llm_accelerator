@@ -23,6 +23,7 @@ from layer_descriptor_builder import (  # noqa: E402
     WEIGHT_BUFFER_BYTES,
     build_decode_descriptors,
     build_prefill_descriptors,
+    default_prefill_tile_config,
     summary_dict,
 )
 from qwen_model_spec import load_qwen_model_spec  # noqa: E402
@@ -37,7 +38,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Validate descriptor generation and DDR/SRAM layout invariants.")
     parser.add_argument("--past-seq-len", type=int, default=128)
     parser.add_argument("--prefill-seq-len", type=int, default=256)
-    parser.add_argument("--tile-m", type=int, default=64)
     parser.add_argument("--activation-base", type=int, default=0)
     parser.add_argument("--weight-base", type=int, default=1 << 20)
     parser.add_argument("--scale-base", type=int, default=1 << 30)
@@ -62,12 +62,12 @@ def main() -> None:
     )
     prefill_descriptors = build_prefill_descriptors(
         seq_len=args.prefill_seq_len,
-        tile_m=args.tile_m,
         activation_base_addr=args.activation_base,
         weight_base_addr=args.weight_base,
         scale_base_addr=args.scale_base,
         kv_cache_base_addr=args.kv_base,
         scratch_base_addr=args.scratch_base,
+        tile_config=default_prefill_tile_config(),
         spec=spec,
     )
 

@@ -46,16 +46,18 @@ void project_tiled(
     const llm_accel::scalar_t* scales,
     int in_dim,
     int out_dim,
+    int in_tile,
+    int out_tile,
     llm_accel::scalar_t* output) {
-  std::array<llm_accel::scalar_t, llm_accel::kTileN> input_tile{};
-  std::array<llm_accel::scalar_t, llm_accel::kTileN> partial_sum{};
+  std::vector<llm_accel::scalar_t> input_tile(static_cast<std::size_t>(in_tile), 0.0f);
+  std::vector<llm_accel::scalar_t> partial_sum(static_cast<std::size_t>(out_tile), 0.0f);
 
-  for (int out_base = 0; out_base < out_dim; out_base += llm_accel::kTileN) {
-    const int out_extent = std::min(llm_accel::kTileN, out_dim - out_base);
-    partial_sum.fill(0.0f);
+  for (int out_base = 0; out_base < out_dim; out_base += out_tile) {
+    const int out_extent = std::min(out_tile, out_dim - out_base);
+    std::fill(partial_sum.begin(), partial_sum.end(), 0.0f);
 
-    for (int in_base = 0; in_base < in_dim; in_base += llm_accel::kTileN) {
-      const int in_extent = std::min(llm_accel::kTileN, in_dim - in_base);
+    for (int in_base = 0; in_base < in_dim; in_base += in_tile) {
+      const int in_extent = std::min(in_tile, in_dim - in_base);
       for (int in_offset = 0; in_offset < in_extent; ++in_offset) {
         input_tile[in_offset] = input_token[in_base + in_offset];
       }
@@ -86,7 +88,7 @@ namespace llm_accel {
 KernelStatus qwen_prefill_mlp_kernel(
     const scalar_t* attention_residual,
     int seq_len,
-    int tile_m,
+  const PrefillMLPTileConfig& tile_config,
     const scalar_t* post_attention_layernorm_weight,
     scalar_t rms_eps,
     const packed_w4_t* gate_packed_weights,
@@ -96,31 +98,61 @@ KernelStatus qwen_prefill_mlp_kernel(
     const scalar_t* up_scales,
     const scalar_t* down_scales,
     scalar_t* output_sequence) {
-  if (attention_residual == nullptr || output_sequence == nullptr || seq_len <= 0 || tile_m <= 0 ||
+  if (attention_residual == nullptr || output_sequence == nullptr || seq_len <= 0 ||
       post_attention_layernorm_weight == nullptr || gate_packed_weights == nullptr || up_packed_weights == nullptr ||
-      down_packed_weights == nullptr || gate_scales == nullptr || up_scales == nullptr || down_scales == nullptr) {
+      down_packed_weights == nullptr || gate_scales == nullptr || up_scales == nullptr || down_scales == nullptr ||
+      tile_config.seq <= 0 || tile_config.hidden <= 0 || tile_config.ff <= 0) {
     return {false, 1};
   }
 
-  for (int token_index = 0; token_index < seq_len; ++token_index) {
-    const scalar_t* attention_token = attention_residual + static_cast<std::size_t>(token_index) * kHiddenSize;
-    scalar_t* output_token = output_sequence + static_cast<std::size_t>(token_index) * kHiddenSize;
+  const int seq_tile = std::max(1, tile_config.seq);
 
-    std::array<scalar_t, kHiddenSize> post_norm{};
-    std::array<scalar_t, kIntermediateSize> gate_proj{};
-    std::array<scalar_t, kIntermediateSize> up_proj{};
-    std::array<scalar_t, kIntermediateSize> silu_mul{};
-    std::array<scalar_t, kHiddenSize> down_proj{};
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = std::min(seq_len, token_begin + seq_tile);
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      const scalar_t* attention_token = attention_residual + static_cast<std::size_t>(token_index) * kHiddenSize;
+      scalar_t* output_token = output_sequence + static_cast<std::size_t>(token_index) * kHiddenSize;
 
-    rmsnorm_token(attention_token, post_attention_layernorm_weight, rms_eps, post_norm.data());
-    project_tiled(post_norm.data(), gate_packed_weights, gate_scales, kHiddenSize, kIntermediateSize, gate_proj.data());
-    project_tiled(post_norm.data(), up_packed_weights, up_scales, kHiddenSize, kIntermediateSize, up_proj.data());
-    for (int index = 0; index < kIntermediateSize; ++index) {
-      silu_mul[index] = silu(gate_proj[index]) * up_proj[index];
-    }
-    project_tiled(silu_mul.data(), down_packed_weights, down_scales, kIntermediateSize, kHiddenSize, down_proj.data());
-    for (int index = 0; index < kHiddenSize; ++index) {
-      output_token[index] = attention_token[index] + down_proj[index];
+      std::array<scalar_t, kHiddenSize> post_norm{};
+      std::array<scalar_t, kIntermediateSize> gate_proj{};
+      std::array<scalar_t, kIntermediateSize> up_proj{};
+      std::array<scalar_t, kIntermediateSize> silu_mul{};
+      std::array<scalar_t, kHiddenSize> down_proj{};
+
+      rmsnorm_token(attention_token, post_attention_layernorm_weight, rms_eps, post_norm.data());
+      project_tiled(
+          post_norm.data(),
+          gate_packed_weights,
+          gate_scales,
+          kHiddenSize,
+          kIntermediateSize,
+          tile_config.hidden,
+          tile_config.ff,
+          gate_proj.data());
+      project_tiled(
+          post_norm.data(),
+          up_packed_weights,
+          up_scales,
+          kHiddenSize,
+          kIntermediateSize,
+          tile_config.hidden,
+          tile_config.ff,
+          up_proj.data());
+      for (int index = 0; index < kIntermediateSize; ++index) {
+        silu_mul[index] = silu(gate_proj[index]) * up_proj[index];
+      }
+      project_tiled(
+          silu_mul.data(),
+          down_packed_weights,
+          down_scales,
+          kIntermediateSize,
+          kHiddenSize,
+          tile_config.ff,
+          tile_config.hidden,
+          down_proj.data());
+      for (int index = 0; index < kHiddenSize; ++index) {
+        output_token[index] = attention_token[index] + down_proj[index];
+      }
     }
   }
 

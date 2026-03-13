@@ -40,7 +40,7 @@ class DescriptorDispatchBackend(BackendInterface):
         self.last_descriptor_trace: dict[str, Any] | None = None
 
     def _run_with_descriptors(self, input_ids: torch.Tensor, cache: Any, is_prefill: bool) -> tuple[torch.Tensor, Any]:
-        from layer_descriptor_builder import build_decode_descriptors, build_prefill_descriptors
+        from layer_descriptor_builder import build_decode_descriptors, build_prefill_descriptors, default_prefill_tile_config
 
         qwen_model = self.model.model
         inputs_embeds = qwen_model.embed_tokens(input_ids.to(self.device))
@@ -74,12 +74,12 @@ class DescriptorDispatchBackend(BackendInterface):
         if is_prefill:
             descriptors = build_prefill_descriptors(
                 seq_len=input_ids.shape[1],
-                tile_m=min(self.model.config.max_position_embeddings, input_ids.shape[1]),
                 activation_base_addr=self.activation_base_addr,
                 weight_base_addr=self.weight_base_addr,
                 scale_base_addr=self.scale_base_addr,
                 kv_cache_base_addr=self.kv_cache_base_addr,
                 scratch_base_addr=self.scratch_base_addr,
+                tile_config=default_prefill_tile_config(),
             )
         else:
             descriptors = build_decode_descriptors(

@@ -24,6 +24,17 @@ DEFAULT_LIB_PATH = ROOT / "tmp" / "host_libs" / "libqwen_prefill_stub.so"
 HIDDEN_SIZE = 1536
 KV_WIDTH = 256
 INTERMEDIATE_SIZE = 8960
+ATTENTION_SEQ_TILE = 128
+ATTENTION_QUERY_TILE = 128
+ATTENTION_KEY_TILE = 128
+ATTENTION_HIDDEN_PROJ_TILE = 256
+ATTENTION_KV_PROJ_TILE = 256
+ATTENTION_HEAD_DIM_TILE = 128
+ATTENTION_QUERY_HEADS_PARALLEL = 2
+ATTENTION_KV_HEADS_PARALLEL = 1
+MLP_SEQ_TILE = 128
+MLP_HIDDEN_TILE = 256
+MLP_FF_TILE = 640
 
 
 def set_packed_weight(packed: np.ndarray, out_dim: int, in_dim: int, out_index: int, in_index: int, value: int) -> None:
@@ -49,7 +60,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Regression-test prefill top wrapper address decoding against the direct full-layer smoke wrapper.")
     parser.add_argument("--lib-path", type=Path, default=DEFAULT_LIB_PATH)
     parser.add_argument("--seq-len", type=int, default=4)
-    parser.add_argument("--tile-m", type=int, default=2)
     parser.add_argument("--atol", type=float, default=1e-5)
     args = parser.parse_args()
 
@@ -120,6 +130,16 @@ def main() -> None:
         float_ptr,
         ctypes.c_int,
         ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
         float_ptr,
         float_ptr,
         byte_ptr,
@@ -150,6 +170,16 @@ def main() -> None:
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
         ctypes.c_uint64,
         ctypes.c_uint64,
         ctypes.c_uint64,
@@ -171,7 +201,17 @@ def main() -> None:
     status = direct_func(
         np.ascontiguousarray(input_sequence.reshape(-1)),
         args.seq_len,
-        args.tile_m,
+        ATTENTION_SEQ_TILE,
+        ATTENTION_QUERY_TILE,
+        ATTENTION_KEY_TILE,
+        ATTENTION_HIDDEN_PROJ_TILE,
+        ATTENTION_KV_PROJ_TILE,
+        ATTENTION_HEAD_DIM_TILE,
+        ATTENTION_QUERY_HEADS_PARALLEL,
+        ATTENTION_KV_HEADS_PARALLEL,
+        MLP_SEQ_TILE,
+        MLP_HIDDEN_TILE,
+        MLP_FF_TILE,
         input_layernorm_weight,
         post_attention_layernorm_weight,
         q_view,
@@ -201,7 +241,17 @@ def main() -> None:
     status = top_func(
         0,
         args.seq_len,
-        args.tile_m,
+        ATTENTION_SEQ_TILE,
+        ATTENTION_QUERY_TILE,
+        ATTENTION_KEY_TILE,
+        ATTENTION_HIDDEN_PROJ_TILE,
+        ATTENTION_KV_PROJ_TILE,
+        ATTENTION_HEAD_DIM_TILE,
+        ATTENTION_QUERY_HEADS_PARALLEL,
+        ATTENTION_KV_HEADS_PARALLEL,
+        MLP_SEQ_TILE,
+        MLP_HIDDEN_TILE,
+        MLP_FF_TILE,
         0,
         args.seq_len * HIDDEN_SIZE * 4,
         0,

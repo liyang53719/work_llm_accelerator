@@ -28,7 +28,8 @@ scalar_t* scalar_ptr(scalar_t* base, std::uint64_t byte_offset) {
 KernelStatus qwen_prefill_top_wrapper(
     const PrefillLayerDescriptor& descriptor,
     const PrefillTopLevelPorts& ports) {
-  if (!valid_layer_id(descriptor.layer_id) || descriptor.seq_len <= 0 || descriptor.tile_m <= 0) {
+  if (!valid_layer_id(descriptor.layer_id) || descriptor.seq_len <= 0 ||
+      !valid_prefill_tile_config(descriptor.tile_config)) {
     return {false, kInvalidDescriptorError};
   }
   if (ports.weight_ddr == nullptr || ports.scale_ddr == nullptr || ports.kv_cache_ddr == nullptr ||
@@ -79,7 +80,7 @@ KernelStatus qwen_prefill_top_wrapper(
     KernelStatus attention_status = qwen_prefill_attention_kernel(
       input_sequence,
       descriptor.seq_len,
-      descriptor.tile_m,
+      descriptor.tile_config.attention,
       input_layernorm_weight,
       kRmsNormEps,
       q_weights,
@@ -103,7 +104,7 @@ KernelStatus qwen_prefill_top_wrapper(
   return qwen_prefill_mlp_kernel(
       attention_output.data(),
       descriptor.seq_len,
-      descriptor.tile_m,
+      descriptor.tile_config.mlp,
       post_attention_layernorm_weight,
       kRmsNormEps,
       gate_weights,

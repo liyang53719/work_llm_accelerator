@@ -62,22 +62,24 @@ float dequantized_weight(
 void project_tiled_token(
     const llm_accel::scalar_t* input_token,
     const llm_accel::packed_w4_t* packed_weights,
-  const llm_accel::scalar_t* bias,
+    const llm_accel::scalar_t* bias,
     const llm_accel::scalar_t* scales,
     int out_dim,
     int in_dim,
+    int out_tile,
+    int in_tile,
     llm_accel::scalar_t* output) {
-  std::array<llm_accel::scalar_t, llm_accel::kTileN> input_tile{};
-  std::array<llm_accel::scalar_t, llm_accel::kTileN> partial_sum{};
+  std::vector<llm_accel::scalar_t> input_tile(static_cast<std::size_t>(in_tile), 0.0f);
+  std::vector<llm_accel::scalar_t> partial_sum(static_cast<std::size_t>(out_tile), 0.0f);
 
-  for (int out_base = 0; out_base < out_dim; out_base += llm_accel::kTileN) {
-    const int out_extent = std::min(llm_accel::kTileN, out_dim - out_base);
+  for (int out_base = 0; out_base < out_dim; out_base += out_tile) {
+    const int out_extent = std::min(out_tile, out_dim - out_base);
     for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
       partial_sum[out_offset] = bias == nullptr ? 0.0f : bias[out_base + out_offset];
     }
 
-    for (int in_base = 0; in_base < in_dim; in_base += llm_accel::kTileN) {
-      const int in_extent = std::min(llm_accel::kTileN, in_dim - in_base);
+    for (int in_base = 0; in_base < in_dim; in_base += in_tile) {
+      const int in_extent = std::min(in_tile, in_dim - in_base);
       for (int in_offset = 0; in_offset < in_extent; ++in_offset) {
         input_tile[in_offset] = input_token[in_base + in_offset];
       }
@@ -105,52 +107,73 @@ void prefill_attention_context_block(
     int seq_len,
     int query_begin,
     int query_end,
+    const llm_accel::PrefillAttentionTileConfig& tile_config,
     llm_accel::scalar_t* context) {
   const float scaling = static_cast<float>(1.0 / std::sqrt(static_cast<double>(llm_accel::kHeadDim)));
+  const int key_tile = std::max(1, tile_config.key);
+  const int query_heads_parallel = std::max(1, tile_config.query_heads_parallel);
 
   for (int query_index = query_begin; query_index < query_end; ++query_index) {
     const llm_accel::scalar_t* q_token = q_proj + static_cast<std::size_t>(query_index) * llm_accel::kHiddenSize;
     llm_accel::scalar_t* context_token = context + static_cast<std::size_t>(query_index) * llm_accel::kHiddenSize;
 
-    for (int head = 0; head < llm_accel::kNumAttentionHeads; ++head) {
-      const int kv_head = head / kNumGroups;
-      const llm_accel::scalar_t* q_head = q_token + head * llm_accel::kHeadDim;
+    for (int head_base = 0; head_base < llm_accel::kNumAttentionHeads; head_base += query_heads_parallel) {
+      const int head_end = std::min(llm_accel::kNumAttentionHeads, head_base + query_heads_parallel);
+      std::vector<float> max_score(static_cast<std::size_t>(head_end - head_base), -1.0e30f);
+      std::vector<float> denom(static_cast<std::size_t>(head_end - head_base), 0.0f);
+      std::vector<std::vector<float>> accum(
+          static_cast<std::size_t>(head_end - head_base),
+          std::vector<float>(llm_accel::kHeadDim, 0.0f));
 
-      float max_score = -1.0e30f;
-      for (int key_index = 0; key_index <= query_index && key_index < seq_len; ++key_index) {
-        const llm_accel::scalar_t* k_head =
-            k_proj + static_cast<std::size_t>(key_index) * kKvWidth + kv_head * llm_accel::kHeadDim;
-        float score = 0.0f;
-        for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-          score += q_head[dim] * k_head[dim];
-        }
-        max_score = std::max(max_score, score * scaling);
-      }
-
-      float denom = 0.0f;
-      std::array<float, llm_accel::kHeadDim> accum{};
-      accum.fill(0.0f);
-      for (int key_index = 0; key_index <= query_index && key_index < seq_len; ++key_index) {
-        const llm_accel::scalar_t* k_head =
-            k_proj + static_cast<std::size_t>(key_index) * kKvWidth + kv_head * llm_accel::kHeadDim;
-        const llm_accel::scalar_t* v_head =
-            v_proj + static_cast<std::size_t>(key_index) * kKvWidth + kv_head * llm_accel::kHeadDim;
-
-        float score = 0.0f;
-        for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-          score += q_head[dim] * k_head[dim];
-        }
-        const float exp_score = std::exp(score * scaling - max_score);
-        denom += exp_score;
-        for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-          accum[dim] += exp_score * v_head[dim];
+      for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
+        const int key_end = std::min(seq_len, std::min(query_index + 1, key_begin + key_tile));
+        for (int head = head_base; head < head_end; ++head) {
+          const int head_offset = head - head_base;
+          const int kv_head = head / kNumGroups;
+          const llm_accel::scalar_t* q_head = q_token + head * llm_accel::kHeadDim;
+          for (int key_index = key_begin; key_index < key_end; ++key_index) {
+            const llm_accel::scalar_t* k_head =
+                k_proj + static_cast<std::size_t>(key_index) * kKvWidth + kv_head * llm_accel::kHeadDim;
+            float score = 0.0f;
+            for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
+              score += q_head[dim] * k_head[dim];
+            }
+            max_score[head_offset] = std::max(max_score[head_offset], score * scaling);
+          }
         }
       }
 
-      llm_accel::scalar_t* context_head = context_token + head * llm_accel::kHeadDim;
-      const float inv_denom = denom > 0.0f ? 1.0f / denom : 0.0f;
-      for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-        context_head[dim] = accum[dim] * inv_denom;
+      for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
+        const int key_end = std::min(seq_len, std::min(query_index + 1, key_begin + key_tile));
+        for (int head = head_base; head < head_end; ++head) {
+          const int head_offset = head - head_base;
+          const int kv_head = head / kNumGroups;
+          const llm_accel::scalar_t* q_head = q_token + head * llm_accel::kHeadDim;
+          for (int key_index = key_begin; key_index < key_end; ++key_index) {
+            const llm_accel::scalar_t* k_head =
+                k_proj + static_cast<std::size_t>(key_index) * kKvWidth + kv_head * llm_accel::kHeadDim;
+            const llm_accel::scalar_t* v_head =
+                v_proj + static_cast<std::size_t>(key_index) * kKvWidth + kv_head * llm_accel::kHeadDim;
+            float score = 0.0f;
+            for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
+              score += q_head[dim] * k_head[dim];
+            }
+            const float exp_score = std::exp(score * scaling - max_score[head_offset]);
+            denom[head_offset] += exp_score;
+            for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
+              accum[head_offset][dim] += exp_score * v_head[dim];
+            }
+          }
+        }
+      }
+
+      for (int head = head_base; head < head_end; ++head) {
+        const int head_offset = head - head_base;
+        llm_accel::scalar_t* context_head = context_token + head * llm_accel::kHeadDim;
+        const float inv_denom = denom[head_offset] > 0.0f ? 1.0f / denom[head_offset] : 0.0f;
+        for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
+          context_head[dim] = accum[head_offset][dim] * inv_denom;
+        }
       }
     }
   }
@@ -163,7 +186,7 @@ namespace llm_accel {
 KernelStatus qwen_prefill_attention_kernel(
     const scalar_t* input_sequence,
     int seq_len,
-    int tile_m,
+  const PrefillAttentionTileConfig& tile_config,
     const scalar_t* input_layernorm_weight,
     scalar_t rms_eps,
     const packed_w4_t* q_packed_weights,
@@ -180,13 +203,19 @@ KernelStatus qwen_prefill_attention_kernel(
     scalar_t* k_cache,
     scalar_t* v_cache,
     scalar_t* output_sequence) {
-  if (input_sequence == nullptr || output_sequence == nullptr || seq_len <= 0 || tile_m <= 0 ||
+  if (input_sequence == nullptr || output_sequence == nullptr || seq_len <= 0 ||
       input_layernorm_weight == nullptr || q_packed_weights == nullptr || k_packed_weights == nullptr ||
       v_packed_weights == nullptr || o_packed_weights == nullptr || q_bias == nullptr || k_bias == nullptr ||
       v_bias == nullptr || q_scales == nullptr || k_scales == nullptr ||
-      v_scales == nullptr || o_scales == nullptr || k_cache == nullptr || v_cache == nullptr) {
+      v_scales == nullptr || o_scales == nullptr || k_cache == nullptr || v_cache == nullptr ||
+      tile_config.seq <= 0 || tile_config.query <= 0 || tile_config.key <= 0 || tile_config.hidden_proj <= 0 ||
+      tile_config.kv_proj <= 0 || tile_config.head_dim != kHeadDim || tile_config.query_heads_parallel <= 0 ||
+      tile_config.kv_heads_parallel <= 0) {
     return {false, 1};
   }
+
+  const int seq_tile = std::max(1, tile_config.seq);
+  const int query_tile = std::max(1, tile_config.query);
 
   std::vector<scalar_t> input_norm(static_cast<std::size_t>(seq_len) * kHiddenSize, 0.0f);
   std::vector<scalar_t> q_proj(static_cast<std::size_t>(seq_len) * kHiddenSize, 0.0f);
@@ -194,40 +223,96 @@ KernelStatus qwen_prefill_attention_kernel(
   std::vector<scalar_t> v_proj(static_cast<std::size_t>(seq_len) * kKvWidth, 0.0f);
   std::vector<scalar_t> context(static_cast<std::size_t>(seq_len) * kHiddenSize, 0.0f);
 
-  for (int token_index = 0; token_index < seq_len; ++token_index) {
-    const scalar_t* input_token = input_sequence + static_cast<std::size_t>(token_index) * kHiddenSize;
-    scalar_t* input_norm_token = input_norm.data() + static_cast<std::size_t>(token_index) * kHiddenSize;
-    scalar_t* q_proj_token = q_proj.data() + static_cast<std::size_t>(token_index) * kHiddenSize;
-    scalar_t* k_proj_token = k_proj.data() + static_cast<std::size_t>(token_index) * kKvWidth;
-    scalar_t* v_proj_token = v_proj.data() + static_cast<std::size_t>(token_index) * kKvWidth;
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = std::min(seq_len, token_begin + seq_tile);
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      const scalar_t* input_token = input_sequence + static_cast<std::size_t>(token_index) * kHiddenSize;
+      scalar_t* input_norm_token = input_norm.data() + static_cast<std::size_t>(token_index) * kHiddenSize;
+      scalar_t* q_proj_token = q_proj.data() + static_cast<std::size_t>(token_index) * kHiddenSize;
+      scalar_t* k_proj_token = k_proj.data() + static_cast<std::size_t>(token_index) * kKvWidth;
+      scalar_t* v_proj_token = v_proj.data() + static_cast<std::size_t>(token_index) * kKvWidth;
 
-    rmsnorm_token(input_token, input_layernorm_weight, rms_eps, input_norm_token);
-    project_tiled_token(input_norm_token, q_packed_weights, q_bias, q_scales, kHiddenSize, kHiddenSize, q_proj_token);
-    project_tiled_token(input_norm_token, k_packed_weights, k_bias, k_scales, kKvWidth, kHiddenSize, k_proj_token);
-    project_tiled_token(input_norm_token, v_packed_weights, v_bias, v_scales, kKvWidth, kHiddenSize, v_proj_token);
+      rmsnorm_token(input_token, input_layernorm_weight, rms_eps, input_norm_token);
+      project_tiled_token(
+          input_norm_token,
+          q_packed_weights,
+          q_bias,
+          q_scales,
+          kHiddenSize,
+          kHiddenSize,
+          tile_config.hidden_proj,
+          tile_config.hidden_proj,
+          q_proj_token);
+      project_tiled_token(
+          input_norm_token,
+          k_packed_weights,
+          k_bias,
+          k_scales,
+          kKvWidth,
+          kHiddenSize,
+          tile_config.kv_proj,
+          tile_config.hidden_proj,
+          k_proj_token);
+      project_tiled_token(
+          input_norm_token,
+          v_packed_weights,
+          v_bias,
+          v_scales,
+          kKvWidth,
+          kHiddenSize,
+          tile_config.kv_proj,
+          tile_config.hidden_proj,
+          v_proj_token);
 
-    for (int head = 0; head < kNumAttentionHeads; ++head) {
-      apply_rope_inplace(q_proj_token + head * kHeadDim, token_index);
-    }
-    for (int head = 0; head < kNumKeyValueHeads; ++head) {
-      apply_rope_inplace(k_proj_token + head * kHeadDim, token_index);
-    }
+      for (int head_base = 0; head_base < kNumAttentionHeads; head_base += tile_config.query_heads_parallel) {
+        const int head_end = std::min(kNumAttentionHeads, head_base + tile_config.query_heads_parallel);
+        for (int head = head_base; head < head_end; ++head) {
+          apply_rope_inplace(q_proj_token + head * kHeadDim, token_index);
+        }
+      }
+      for (int head_base = 0; head_base < kNumKeyValueHeads; head_base += tile_config.kv_heads_parallel) {
+        const int head_end = std::min(kNumKeyValueHeads, head_base + tile_config.kv_heads_parallel);
+        for (int head = head_base; head < head_end; ++head) {
+          apply_rope_inplace(k_proj_token + head * kHeadDim, token_index);
+        }
+      }
 
-    for (int index = 0; index < kKvWidth; ++index) {
-      k_cache[static_cast<std::size_t>(token_index) * kKvWidth + index] = k_proj_token[index];
-      v_cache[static_cast<std::size_t>(token_index) * kKvWidth + index] = v_proj_token[index];
+      for (int index = 0; index < kKvWidth; ++index) {
+        k_cache[static_cast<std::size_t>(token_index) * kKvWidth + index] = k_proj_token[index];
+        v_cache[static_cast<std::size_t>(token_index) * kKvWidth + index] = v_proj_token[index];
+      }
     }
   }
 
-  for (int query_begin = 0; query_begin < seq_len; query_begin += tile_m) {
-    const int query_end = std::min(seq_len, query_begin + tile_m);
-    prefill_attention_context_block(q_proj.data(), k_proj.data(), v_proj.data(), seq_len, query_begin, query_end, context.data());
+  for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
+    const int query_end = std::min(seq_len, query_begin + query_tile);
+    prefill_attention_context_block(
+        q_proj.data(),
+        k_proj.data(),
+        v_proj.data(),
+        seq_len,
+        query_begin,
+        query_end,
+        tile_config,
+        context.data());
   }
 
-  for (int token_index = 0; token_index < seq_len; ++token_index) {
-    const scalar_t* context_token = context.data() + static_cast<std::size_t>(token_index) * kHiddenSize;
-    scalar_t* output_token = output_sequence + static_cast<std::size_t>(token_index) * kHiddenSize;
-    project_tiled_token(context_token, o_packed_weights, nullptr, o_scales, kHiddenSize, kHiddenSize, output_token);
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = std::min(seq_len, token_begin + seq_tile);
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      const scalar_t* context_token = context.data() + static_cast<std::size_t>(token_index) * kHiddenSize;
+      scalar_t* output_token = output_sequence + static_cast<std::size_t>(token_index) * kHiddenSize;
+      project_tiled_token(
+          context_token,
+          o_packed_weights,
+          nullptr,
+          o_scales,
+          kHiddenSize,
+          kHiddenSize,
+          tile_config.hidden_proj,
+          tile_config.hidden_proj,
+          output_token);
+    }
   }
 
   return {true, 0};

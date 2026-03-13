@@ -8,7 +8,7 @@ namespace llm_accel {
 KernelStatus qwen_prefill_attention_kernel(
     const scalar_t* input_sequence,
     int seq_len,
-    int tile_m,
+    const PrefillAttentionTileConfig& tile_config,
     const scalar_t* input_layernorm_weight,
     scalar_t rms_eps,
     const packed_w4_t* q_packed_weights,

@@ -19,6 +19,14 @@ HEAD_DIM = 128
 KV_WIDTH = NUM_KEY_VALUE_HEADS * HEAD_DIM
 ROPE_THETA = 1_000_000.0
 RMS_NORM_EPS = 1.0e-6
+ATTENTION_SEQ_TILE = 128
+ATTENTION_QUERY_TILE = 128
+ATTENTION_KEY_TILE = 128
+ATTENTION_HIDDEN_PROJ_TILE = 256
+ATTENTION_KV_PROJ_TILE = 256
+ATTENTION_HEAD_DIM_TILE = 128
+ATTENTION_QUERY_HEADS_PARALLEL = 2
+ATTENTION_KV_HEADS_PARALLEL = 1
 
 
 def set_packed_weight(packed: np.ndarray, out_dim: int, in_dim: int, out_index: int, in_index: int, value: int) -> None:
@@ -100,7 +108,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test the prefill attention kernel through its C ABI wrapper.")
     parser.add_argument("--lib-path", type=Path, default=DEFAULT_LIB_PATH)
     parser.add_argument("--seq-len", type=int, default=2)
-    parser.add_argument("--tile-m", type=int, default=1)
     parser.add_argument("--atol", type=float, default=1e-5)
     args = parser.parse_args()
 
@@ -140,6 +147,13 @@ def main() -> None:
         float_ptr,
         ctypes.c_int,
         ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
         float_ptr,
         byte_ptr,
         byte_ptr,
@@ -161,7 +175,14 @@ def main() -> None:
     status = func(
         np.ascontiguousarray(input_sequence.reshape(-1)),
         args.seq_len,
-        args.tile_m,
+        ATTENTION_SEQ_TILE,
+        ATTENTION_QUERY_TILE,
+        ATTENTION_KEY_TILE,
+        ATTENTION_HIDDEN_PROJ_TILE,
+        ATTENTION_KV_PROJ_TILE,
+        ATTENTION_HEAD_DIM_TILE,
+        ATTENTION_QUERY_HEADS_PARALLEL,
+        ATTENTION_KV_HEADS_PARALLEL,
         input_layernorm_weight,
         q_weights,
         k_weights,

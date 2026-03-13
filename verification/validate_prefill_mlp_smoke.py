@@ -14,6 +14,9 @@ DEFAULT_LIB_PATH = ROOT / "tmp" / "host_libs" / "libqwen_prefill_stub.so"
 HIDDEN_SIZE = 1536
 INTERMEDIATE_SIZE = 8960
 RMS_NORM_EPS = 1.0e-6
+MLP_SEQ_TILE = 128
+MLP_HIDDEN_TILE = 256
+MLP_FF_TILE = 640
 
 
 def set_packed_weight(packed: np.ndarray, out_dim: int, in_dim: int, out_index: int, in_index: int, value: int) -> None:
@@ -40,7 +43,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Smoke-test the tiled prefill MLP kernel through its C ABI wrapper.")
     parser.add_argument("--lib-path", type=Path, default=DEFAULT_LIB_PATH)
     parser.add_argument("--seq-len", type=int, default=2)
-    parser.add_argument("--tile-m", type=int, default=1)
     parser.add_argument("--atol", type=float, default=1e-5)
     args = parser.parse_args()
 
@@ -75,6 +77,8 @@ def main() -> None:
         float_ptr,
         ctypes.c_int,
         ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
         float_ptr,
         byte_ptr,
         byte_ptr,
@@ -89,7 +93,9 @@ def main() -> None:
     status = func(
         np.ascontiguousarray(attention_residual.reshape(-1)),
         args.seq_len,
-        args.tile_m,
+        MLP_SEQ_TILE,
+        MLP_HIDDEN_TILE,
+        MLP_FF_TILE,
         post_attention_layernorm_weight,
         gate_weights,
         up_weights,

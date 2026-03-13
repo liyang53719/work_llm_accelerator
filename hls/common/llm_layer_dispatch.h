@@ -27,7 +27,7 @@ struct DecodeLayerDescriptor {
 struct PrefillLayerDescriptor {
   int layer_id;
   int seq_len;
-  int tile_m;
+  PrefillTileConfig tile_config;
   std::uint64_t input_sequence_addr;
   std::uint64_t output_sequence_addr;
   std::uint64_t layer_weights_base_addr;
@@ -45,6 +45,13 @@ struct DispatchStatus {
 
 constexpr bool valid_layer_id(int layer_id) {
   return layer_id >= 0 && layer_id < kNumHiddenLayers;
+}
+
+inline bool valid_prefill_tile_config(const PrefillTileConfig& tile_config) {
+  return tile_config.attention.seq > 0 && tile_config.attention.query > 0 && tile_config.attention.key > 0 &&
+         tile_config.attention.hidden_proj > 0 && tile_config.attention.kv_proj > 0 && tile_config.attention.head_dim > 0 &&
+         tile_config.attention.query_heads_parallel > 0 && tile_config.attention.kv_heads_parallel > 0 &&
+         tile_config.mlp.seq > 0 && tile_config.mlp.hidden > 0 && tile_config.mlp.ff > 0;
 }
 
 }  // namespace llm_accel

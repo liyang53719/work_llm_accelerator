@@ -17,7 +17,11 @@ PYTHON_DIR = PROJECT_ROOT / "python"
 if str(PYTHON_DIR) not in __import__("sys").path:
     __import__("sys").path.insert(0, str(PYTHON_DIR))
 
-from layer_descriptor_builder import build_layer_parameter_layout, load_qwen_model_spec  # noqa: E402
+from layer_descriptor_builder import (  # noqa: E402  # pyright: ignore[reportMissingImports]
+    build_layer_parameter_layout,
+    default_prefill_tile_config,
+    load_qwen_model_spec,
+)
 
 
 def as_numpy(parameter: torch.Tensor, shape: tuple[int, ...]) -> np.ndarray:
@@ -43,7 +47,6 @@ class RealHostTopBackend(BackendInterface):
         reference_backend: TorchReferenceBackend | None = None,
         prefill_lib_path: Path = DEFAULT_PREFILL_LIB_PATH,
         decode_lib_path: Path = DEFAULT_DECODE_LIB_PATH,
-        prefill_tile_m: int = 16,
     ) -> None:
         self.reference_backend = reference_backend or TorchReferenceBackend(device="cpu")
         self.device = self.reference_backend.device
@@ -60,11 +63,14 @@ class RealHostTopBackend(BackendInterface):
         self.num_key_value_heads = self.spec.num_key_value_heads
         self.head_dim = self.hidden_size // self.spec.num_attention_heads
         self.kv_width = self.num_key_value_heads * self.head_dim
-        self.prefill_tile_m = prefill_tile_m
+        self.prefill_tile_config = default_prefill_tile_config()
         self.backend_metadata = {
             "path": "top-wrapper",
             "quantization": "int4-per-output-channel",
-            "prefill_tile_m": prefill_tile_m,
+            "prefill_tile_config": {
+                "attention": self.prefill_tile_config.attention.__dict__,
+                "mlp": self.prefill_tile_config.mlp.__dict__,
+            },
         }
         self.last_layer_trace: dict[str, Any] | None = None
         self._configure_abis()
@@ -76,6 +82,16 @@ class RealHostTopBackend(BackendInterface):
 
         self.prefill_func = self.prefill_lib.qwen_prefill_top_smoke_forward
         self.prefill_func.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
             ctypes.c_int,
@@ -194,7 +210,8 @@ class RealHostTopBackend(BackendInterface):
             hidden_states = self.model.model.embed_tokens(input_ids.to(self.device)).detach().cpu().to(torch.float32).squeeze(0).numpy()
 
         seq_len = int(input_ids.shape[1])
-        tile_m = max(1, min(self.prefill_tile_m, seq_len))
+        attention_tiles = self.prefill_tile_config.attention
+        mlp_tiles = self.prefill_tile_config.mlp
         trace_layers: list[dict[str, int]] = []
         cache_layers: list[tuple[torch.Tensor, torch.Tensor]] = []
 
@@ -210,7 +227,17 @@ class RealHostTopBackend(BackendInterface):
             status = self.prefill_func(
                 layer_id,
                 seq_len,
-                tile_m,
+                attention_tiles.seq,
+                attention_tiles.query,
+                attention_tiles.key,
+                attention_tiles.hidden_proj,
+                attention_tiles.kv_proj,
+                attention_tiles.head_dim,
+                attention_tiles.query_heads_parallel,
+                attention_tiles.kv_heads_parallel,
+                mlp_tiles.seq,
+                mlp_tiles.hidden,
+                mlp_tiles.ff,
                 0,
                 activation_stride * 4,
                 0,
@@ -239,7 +266,18 @@ class RealHostTopBackend(BackendInterface):
                     torch.from_numpy(layer_v_cache.copy()).unsqueeze(0),
                 )
             )
-            trace_layers.append({"layer_id": layer_id, "seq_len": seq_len, "tile_m": tile_m})
+            trace_layers.append(
+                {
+                    "layer_id": layer_id,
+                    "seq_len": seq_len,
+                    "attention_seq_tile": attention_tiles.seq,
+                    "attention_query_tile": attention_tiles.query,
+                    "attention_key_tile": attention_tiles.key,
+                    "mlp_seq_tile": mlp_tiles.seq,
+                    "mlp_hidden_tile": mlp_tiles.hidden,
+                    "mlp_ff_tile": mlp_tiles.ff,
+                }
+            )
 
         self.last_layer_trace = {
             "mode": "prefill",

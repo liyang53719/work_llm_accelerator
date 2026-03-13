@@ -62,7 +62,7 @@ class DecodeLayerDescriptor:
 class PrefillLayerDescriptor:
     layer_id: int
     seq_len: int
-    tile_m: int
+    tile_config: dict[str, object]
     input_sequence_addr: int
     output_sequence_addr: int
     layer_weights_base_addr: int
@@ -70,6 +70,51 @@ class PrefillLayerDescriptor:
     k_cache_base_addr: int
     v_cache_base_addr: int
     scratch_base_addr: int
+
+
+@dataclass(frozen=True)
+class PrefillAttentionTileConfig:
+    seq: int
+    query: int
+    key: int
+    hidden_proj: int
+    kv_proj: int
+    head_dim: int
+    query_heads_parallel: int
+    kv_heads_parallel: int
+
+
+@dataclass(frozen=True)
+class PrefillMLPTileConfig:
+    seq: int
+    hidden: int
+    ff: int
+
+
+@dataclass(frozen=True)
+class PrefillTileConfig:
+    attention: PrefillAttentionTileConfig
+    mlp: PrefillMLPTileConfig
+
+
+def default_prefill_tile_config() -> PrefillTileConfig:
+    return PrefillTileConfig(
+        attention=PrefillAttentionTileConfig(
+            seq=128,
+            query=128,
+            key=128,
+            hidden_proj=256,
+            kv_proj=256,
+            head_dim=128,
+            query_heads_parallel=2,
+            kv_heads_parallel=1,
+        ),
+        mlp=PrefillMLPTileConfig(
+            seq=128,
+            hidden=256,
+            ff=640,
+        ),
+    )
 
 
 def build_layer_parameter_layout(spec: QwenModelSpec) -> LayerParameterLayout:
@@ -195,15 +240,16 @@ def build_decode_descriptors(
 
 def build_prefill_descriptors(
     seq_len: int,
-    tile_m: int,
     activation_base_addr: int,
     weight_base_addr: int,
     scale_base_addr: int,
     kv_cache_base_addr: int,
     scratch_base_addr: int,
+    tile_config: PrefillTileConfig | None = None,
     spec: QwenModelSpec | None = None,
 ) -> list[PrefillLayerDescriptor]:
     spec = load_qwen_model_spec() if spec is None else spec
+    tile_config = default_prefill_tile_config() if tile_config is None else tile_config
     param_layout = build_layer_parameter_layout(spec)
     kv_layout = build_kv_cache_layout(spec)
     activation_stride = seq_len * spec.hidden_size * 4
@@ -218,7 +264,7 @@ def build_prefill_descriptors(
             PrefillLayerDescriptor(
                 layer_id=layer_id,
                 seq_len=seq_len,
-                tile_m=tile_m,
+                tile_config=asdict(tile_config),
                 input_sequence_addr=activation_base_addr + layer_id * activation_stride,
                 output_sequence_addr=activation_base_addr + (layer_id + 1) * activation_stride,
                 layer_weights_base_addr=layer_weight_base,
