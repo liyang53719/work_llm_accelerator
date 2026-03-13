@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+import faulthandler
 import json
 from pathlib import Path
 import sys
+import time
 
 import numpy as np
 import torch
@@ -29,6 +31,9 @@ from real_host_top_backend import quantize_int4_per_channel  # noqa: E402
 
 DEFAULT_CASE_DIR = Path(__file__).resolve().parents[1] / "tmp" / "reference_cases"
 DEFAULT_CASE_GLOB = "*_prefill_case.npz"
+DEFAULT_REPORT_DIR = Path(__file__).resolve().parents[1] / "tmp" / "analysis"
+DEFAULT_JSON_REPORT_PATH = DEFAULT_REPORT_DIR / "layer0_quant_batch_baseline.json"
+DEFAULT_MARKDOWN_REPORT_PATH = DEFAULT_REPORT_DIR / "layer0_quant_batch_baseline.md"
 
 
 @dataclass
@@ -36,6 +41,40 @@ class InputCase:
     name: str
     source: str
     layer0_input: torch.Tensor
+
+
+@dataclass
+class ProgressLogger:
+    enabled: bool = True
+
+    def log(self, message: str) -> None:
+        if self.enabled:
+            print(message, flush=True)
+
+
+def elapsed_seconds(start_time: float) -> float:
+    return time.monotonic() - start_time
+
+
+def check_timeout(start_time: float, timeout_seconds: float, logger: ProgressLogger, stage: str) -> None:
+    if timeout_seconds > 0.0 and elapsed_seconds(start_time) > timeout_seconds:
+        logger.log(f"[timeout] exceeded {timeout_seconds:.2f}s after {stage}")
+        raise TimeoutError(f"Timed out after {timeout_seconds:.2f}s during {stage}.")
+
+
+def arm_hard_timeout(timeout_seconds: float, logger: ProgressLogger) -> None:
+    if timeout_seconds <= 0.0:
+        return
+    logger.log(f"[run] arm_hard_timeout={timeout_seconds:.2f}s")
+    faulthandler.dump_traceback_later(timeout_seconds, repeat=False, exit=True)
+
+
+def cancel_hard_timeout() -> None:
+    faulthandler.cancel_dump_traceback_later()
+
+
+def ensure_parent_dir(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
 
 
 def unpack_int4_per_channel(packed: np.ndarray, scales: np.ndarray, out_dim: int, in_dim: int) -> np.ndarray:
@@ -386,12 +425,178 @@ def aggregate_results(case_results: list[dict[str, object]]) -> dict[str, dict[s
     return aggregates
 
 
-def run_case(reference: Layer0PrefillReferenceBackend, input_case: InputCase) -> dict[str, object]:
+def build_result_metadata(
+    reference: Layer0PrefillReferenceBackend,
+    case_paths: list[Path],
+    random_seq_lens: list[int],
+    random_cases: list[InputCase],
+    case_results: list[dict[str, object]],
+) -> dict[str, object]:
+    config = reference.model.config
+    return {
+        "model_scope": {
+            "model_type": str(getattr(config, "model_type", "unknown")),
+            "hidden_size": int(config.hidden_size),
+            "intermediate_size": int(config.intermediate_size),
+            "num_hidden_layers": int(config.num_hidden_layers),
+            "num_attention_heads": int(config.num_attention_heads),
+            "num_key_value_heads": int(config.num_key_value_heads),
+            "analyzed_layer": 0,
+            "parameter_scope": "Qwen2.5 layer0 weights taken from the full pretrained model",
+            "activation_scope": "Layer0 prefill input activations only; not a whole-model end-to-end full-quant rollout",
+        },
+        "statistical_basis": {
+            "case_count": len(case_results),
+            "real_case_count": sum(1 for case_result in case_results if case_result["source"] == "real"),
+            "random_case_count": sum(1 for case_result in case_results if case_result["source"] == "random"),
+            "real_case_paths": [str(path) for path in case_paths],
+            "random_case_generation": {
+                "enabled": bool(random_cases),
+                "count": len(random_cases),
+                "seq_lens": random_seq_lens,
+                "distribution": "Gaussian estimated from concatenated real layer0_input values",
+            },
+            "metric_definition": "mean_max_abs_diff is the arithmetic mean of per-case max_abs_diff for the target tensor.",
+            "layer0_output_definition": "Per-case comparison uses the layer0_output tensor between selective-quant emulation and Torch layer0 reference.",
+        },
+    }
+
+
+def build_markdown_report(result: dict[str, object]) -> str:
+    metadata = result["metadata"]
+    model_scope = metadata["model_scope"]
+    basis = metadata["statistical_basis"]
+    lines: list[str] = []
+    lines.append("# Layer0 Selective-Quant 基线报告")
+    lines.append("")
+    lines.append("## 统计口径")
+    lines.append("")
+    lines.append(f"- 模型参数范围：{model_scope['parameter_scope']}")
+    lines.append(f"- 激活统计范围：{model_scope['activation_scope']}")
+    lines.append(f"- 当前分析层：layer {model_scope['analyzed_layer']}")
+    lines.append(
+        f"- 模型维度：hidden_size={model_scope['hidden_size']}，intermediate_size={model_scope['intermediate_size']}，"
+        f"num_hidden_layers={model_scope['num_hidden_layers']}，num_attention_heads={model_scope['num_attention_heads']}，"
+        f"num_key_value_heads={model_scope['num_key_value_heads']}"
+    )
+    lines.append(f"- 总样本数：{basis['case_count']} = 真实 case {basis['real_case_count']} + 随机 case {basis['random_case_count']}")
+    lines.append(f"- 均值定义：{basis['metric_definition']}")
+    lines.append(f"- layer0_output 定义：{basis['layer0_output_definition']}")
+    if basis["real_case_paths"]:
+        lines.append("- 真实 case 来源：")
+        for case_path in basis["real_case_paths"]:
+            lines.append(f"  - {case_path}")
+    random_generation = basis["random_case_generation"]
+    if random_generation["enabled"]:
+        lines.append(
+            f"- 随机 case：count={random_generation['count']}，seq_lens={random_generation['seq_lens']}，"
+            f"distribution={random_generation['distribution']}"
+        )
+    lines.append("")
+    lines.append("## 关键结论")
+    lines.append("")
+    if "all_cases" in result["aggregates"]:
+        all_full = result["aggregates"]["all_cases"]["full_quant"]["layer0_output"]
+        all_attn = result["aggregates"]["all_cases"]["attention_only_quant"]["layer0_output"]
+        all_mlp = result["aggregates"]["all_cases"]["mlp_only_quant"]["layer0_output"]
+        lines.append(
+            f"- all_cases 下，full-quant 的 layer0_output mean_max_abs_diff = {all_full['mean_max_abs_diff']:.6f}，"
+            f"这是对 {all_full['case_count']} 个 case 的逐 case max_abs_diff 取算术平均得到。"
+        )
+        lines.append(
+            f"- all_cases 下，attention-only 的 layer0_output mean_max_abs_diff = {all_attn['mean_max_abs_diff']:.6f}，"
+            f"最坏值 = {all_attn['worst_max_abs_diff']:.6f}。"
+        )
+        lines.append(
+            f"- all_cases 下，mlp-only 的 layer0_output mean_max_abs_diff = {all_mlp['mean_max_abs_diff']:.6f}，"
+            f"最坏值 = {all_mlp['worst_max_abs_diff']:.6f}。"
+        )
+    if "real_cases" in result["aggregates"]:
+        real_attn = result["aggregates"]["real_cases"]["attention_only_quant"]["layer0_output"]
+        real_mlp = result["aggregates"]["real_cases"]["mlp_only_quant"]["layer0_output"]
+        real_full = result["aggregates"]["real_cases"]["full_quant"]["layer0_output"]
+        lines.append(
+            f"- 只看真实 case 时，attention-only / mlp-only / full-quant 的均值分别为 "
+            f"{real_attn['mean_max_abs_diff']:.6f} / {real_mlp['mean_max_abs_diff']:.6f} / {real_full['mean_max_abs_diff']:.6f}。"
+        )
+    lines.append("")
+    lines.append("## 聚合结果")
+    lines.append("")
+    lines.append("| 样本组 | 模式 | case_count | mean_max_abs_diff | worst_max_abs_diff | mean_min_diff | mean_max_diff |")
+    lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: |")
+    for group_name, group_summary in result["aggregates"].items():
+        for mode_name in ("attention_only_quant", "mlp_only_quant", "full_quant"):
+            layer0_summary = group_summary[mode_name]["layer0_output"]
+            lines.append(
+                f"| {group_name} | {mode_name} | {layer0_summary['case_count']} | "
+                f"{layer0_summary['mean_max_abs_diff']:.6f} | {layer0_summary['worst_max_abs_diff']:.6f} | "
+                f"{layer0_summary['mean_min_diff']:.6f} | {layer0_summary['mean_max_diff']:.6f} |"
+            )
+    lines.append("")
+    lines.append("## 分 case 摘要")
+    lines.append("")
+    lines.append("| case_name | source | seq_len | attn_max_abs | mlp_max_abs | full_max_abs | attn_range | mlp_range |")
+    lines.append("| --- | --- | ---: | ---: | ---: | ---: | --- | --- |")
+    for case_result in result["cases"]:
+        headline = case_result["headline"]
+        lines.append(
+            f"| {case_result['case_name']} | {case_result['source']} | {case_result['seq_len']} | "
+            f"{headline['attention_only_layer0_output_max_abs_diff']:.6f} | "
+            f"{headline['mlp_only_layer0_output_max_abs_diff']:.6f} | "
+            f"{headline['full_quant_layer0_output_max_abs_diff']:.6f} | "
+            f"[{headline['attention_only_layer0_output_min_diff']:.6f}, {headline['attention_only_layer0_output_max_diff']:.6f}] | "
+            f"[{headline['mlp_only_layer0_output_min_diff']:.6f}, {headline['mlp_only_layer0_output_max_diff']:.6f}] |"
+        )
+    lines.append("")
+    lines.append("## 说明")
+    lines.append("")
+    lines.append("- 这里的 full-quant 均值不是整网 end-to-end logits 误差均值，而是 layer0 selective-quant 诊断里 `layer0_output` 的逐 case `max_abs_diff` 平均值。")
+    lines.append("- 如果后续要作为 RTL tile 切分的 signoff 基线，建议优先参考 real_cases 与 all_cases 两组的 layer0_output 包络，而不是只看均值。")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def write_reports(result: dict[str, object], json_report_path: Path, markdown_report_path: Path) -> None:
+    ensure_parent_dir(json_report_path)
+    ensure_parent_dir(markdown_report_path)
+    json_report_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
+    markdown_report_path.write_text(build_markdown_report(result), encoding="utf-8")
+
+
+def run_case(
+    reference: Layer0PrefillReferenceBackend,
+    input_case: InputCase,
+    global_start_time: float,
+    timeout_seconds: float,
+    logger: ProgressLogger,
+) -> dict[str, object]:
+    case_start_time = time.monotonic()
+    logger.log(f"[case] start name={input_case.name} source={input_case.source} seq_len={int(input_case.layer0_input.shape[1])}")
+
+    phase_start = time.monotonic()
     reference_outputs = reference.run(input_case.layer0_input).as_dict()
+    logger.log(f"[case] {input_case.name} reference_run={elapsed_seconds(phase_start):.3f}s")
+    check_timeout(global_start_time, timeout_seconds, logger, f"reference.run for {input_case.name}")
+
+    phase_start = time.monotonic()
     float_outputs = run_wrapper_emulation(reference, input_case.layer0_input)
+    logger.log(f"[case] {input_case.name} float_wrapper={elapsed_seconds(phase_start):.3f}s")
+    check_timeout(global_start_time, timeout_seconds, logger, f"float wrapper for {input_case.name}")
+
+    phase_start = time.monotonic()
     attention_only_outputs = run_attention_only_quant_emulation(reference, input_case.layer0_input)
+    logger.log(f"[case] {input_case.name} attention_only={elapsed_seconds(phase_start):.3f}s")
+    check_timeout(global_start_time, timeout_seconds, logger, f"attention-only emulation for {input_case.name}")
+
+    phase_start = time.monotonic()
     mlp_only_outputs = run_mlp_only_quant_emulation(reference, float_outputs)
+    logger.log(f"[case] {input_case.name} mlp_only={elapsed_seconds(phase_start):.3f}s")
+    check_timeout(global_start_time, timeout_seconds, logger, f"mlp-only emulation for {input_case.name}")
+
+    phase_start = time.monotonic()
     full_quant_outputs = run_mlp_only_quant_emulation(reference, attention_only_outputs)
+    logger.log(f"[case] {input_case.name} full_quant={elapsed_seconds(phase_start):.3f}s")
+    check_timeout(global_start_time, timeout_seconds, logger, f"full-quant emulation for {input_case.name}")
 
     result = {
         "case_name": input_case.name,
@@ -412,6 +617,7 @@ def run_case(reference: Layer0PrefillReferenceBackend, input_case: InputCase) ->
         "mlp_only_layer0_output_min_diff": result["mlp_only_quant"]["layer0_output"]["min_diff"],
         "mlp_only_layer0_output_max_diff": result["mlp_only_quant"]["layer0_output"]["max_diff"],
     }
+    logger.log(f"[case] done name={input_case.name} total={elapsed_seconds(case_start_time):.3f}s")
     return result
 
 
@@ -449,38 +655,90 @@ def main() -> None:
     parser.add_argument("--random-cases", type=int, default=0)
     parser.add_argument("--random-seed", type=int, default=0)
     parser.add_argument("--random-seq-lens", type=str, default="")
+    parser.add_argument("--json-report-path", type=Path, default=DEFAULT_JSON_REPORT_PATH)
+    parser.add_argument("--markdown-report-path", type=Path, default=DEFAULT_MARKDOWN_REPORT_PATH)
+    parser.add_argument("--timeout-seconds", type=float, default=10.0)
+    parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
 
-    reference = Layer0PrefillReferenceBackend()
-    case_paths = discover_case_paths(args.case_dir, args.case_glob, args.case_path)
-    if not case_paths and args.random_cases <= 0:
-        raise FileNotFoundError(f"No cases matched glob '{args.case_glob}' under {args.case_dir}.")
+    run_start_time = time.monotonic()
+    logger = ProgressLogger(enabled=not args.quiet)
+    logger.log(f"[run] start timeout_seconds={args.timeout_seconds:.2f}")
+    arm_hard_timeout(args.timeout_seconds, logger)
 
-    real_cases = load_cases(case_paths)
-    random_seq_lens = parse_seq_lens(args.random_seq_lens)
-    random_cases = build_random_cases(real_cases, args.random_cases, args.random_seed, random_seq_lens)
-    input_cases = [*real_cases, *random_cases]
-    if not input_cases:
-        raise RuntimeError("No valid input cases available for diagnosis.")
+    try:
+        phase_start = time.monotonic()
+        reference = Layer0PrefillReferenceBackend()
+        logger.log(f"[run] init_reference_backend={elapsed_seconds(phase_start):.3f}s")
+        check_timeout(run_start_time, args.timeout_seconds, logger, "reference backend initialization")
 
-    result = {
-        "case_dir": str(args.case_dir),
-        "case_glob": args.case_glob,
-        "default_single_case_path": str(DEFAULT_CASE_PATH),
-        "explicit_case_paths": [str(path) for path in args.case_path],
-        "random_cases": args.random_cases,
-        "random_seed": args.random_seed,
-        "random_seq_lens": random_seq_lens,
-        "cases": [run_case(reference, input_case) for input_case in input_cases],
-    }
-    result["aggregates"] = aggregate_results(result["cases"])
+        phase_start = time.monotonic()
+        case_paths = discover_case_paths(args.case_dir, args.case_glob, args.case_path)
+        if not case_paths and args.random_cases <= 0:
+            raise FileNotFoundError(f"No cases matched glob '{args.case_glob}' under {args.case_dir}.")
+        logger.log(f"[run] discover_case_paths={elapsed_seconds(phase_start):.3f}s count={len(case_paths)}")
 
-    if args.json:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-        return
+        phase_start = time.monotonic()
+        real_cases = load_cases(case_paths)
+        random_seq_lens = parse_seq_lens(args.random_seq_lens)
+        random_cases = build_random_cases(real_cases, args.random_cases, args.random_seed, random_seq_lens)
+        input_cases = [*real_cases, *random_cases]
+        if not input_cases:
+            raise RuntimeError("No valid input cases available for diagnosis.")
+        logger.log(
+            f"[run] prepare_cases={elapsed_seconds(phase_start):.3f}s real={len(real_cases)} random={len(random_cases)} total={len(input_cases)}"
+        )
+        check_timeout(run_start_time, args.timeout_seconds, logger, "case preparation")
 
-    print_text_summary(result)
+        case_results: list[dict[str, object]] = []
+        timed_out = False
+        timeout_message: str | None = None
+        for input_case in input_cases:
+            try:
+                case_results.append(run_case(reference, input_case, run_start_time, args.timeout_seconds, logger))
+            except TimeoutError as error:
+                timed_out = True
+                timeout_message = str(error)
+                logger.log(f"[run] stop_after_case name={input_case.name} reason={timeout_message}")
+                break
+
+        result = {
+            "case_dir": str(args.case_dir),
+            "case_glob": args.case_glob,
+            "default_single_case_path": str(DEFAULT_CASE_PATH),
+            "explicit_case_paths": [str(path) for path in args.case_path],
+            "random_cases": args.random_cases,
+            "random_seed": args.random_seed,
+            "random_seq_lens": random_seq_lens,
+            "timeout_seconds": args.timeout_seconds,
+            "timed_out": timed_out,
+            "timeout_message": timeout_message,
+            "cases_completed": len(case_results),
+            "cases_requested": len(input_cases),
+            "cases": case_results,
+        }
+        result["aggregates"] = aggregate_results(result["cases"])
+        result["metadata"] = build_result_metadata(reference, case_paths, random_seq_lens, random_cases, result["cases"])
+        result["report_paths"] = {
+            "json": str(args.json_report_path),
+            "markdown": str(args.markdown_report_path),
+        }
+
+        phase_start = time.monotonic()
+        write_reports(result, args.json_report_path, args.markdown_report_path)
+        logger.log(f"[run] write_reports={elapsed_seconds(phase_start):.3f}s")
+        logger.log(f"[run] total_elapsed={elapsed_seconds(run_start_time):.3f}s completed_cases={len(case_results)}/{len(input_cases)}")
+
+        if args.json:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+
+        print_text_summary(result)
+        print(f"JSON report: {args.json_report_path}")
+        print(f"Markdown report: {args.markdown_report_path}")
+    finally:
+        cancel_hard_timeout()
 
 
 if __name__ == "__main__":
