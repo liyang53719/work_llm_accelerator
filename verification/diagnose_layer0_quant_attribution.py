@@ -382,7 +382,7 @@ def build_random_cases(real_cases: list[InputCase], random_cases: int, random_se
     rng = np.random.default_rng(random_seed)
     generated_cases: list[InputCase] = []
     for index in range(random_cases):
-        seq_len = int(rng.choice(seq_lens))
+        seq_len = int(seq_lens[index % len(seq_lens)])
         layer0_input = rng.normal(loc=mean, scale=std, size=(1, seq_len, hidden_size)).astype(np.float32)
         generated_cases.append(
             InputCase(
