@@ -1,8 +1,3 @@
-#pragma once
-
-#include "include/ac_std_float.h"
-
-#if 0
 /**************************************************************************
  *                                                                        *
  *  Algorithmic C (tm) Datatypes                                          *
@@ -87,9 +82,9 @@ Overview: this header defines three classes
 #define __AC_STD_FLOAT_H
 #include "ac_float.h"
 #ifdef __EDG__
-#include "catapult_shims/cstring.h"
+#include "../catapult_shims/cstring.h"
 // Inclusion of cmath undefs all macros such as signbit etc that some parsers may define for C
-#include "catapult_shims/cmath.h"
+#include "../catapult_shims/cmath.h"
 #else
 #include <cstring>
 // Inclusion of cmath undefs all macros such as signbit etc that some parsers may define for C
@@ -2679,7 +2674,5 @@ inline bool isnan(const ac::bfloat16 &x) { return x.isnan(); }
 
 #undef __AC_DATA_PRIVATE
 #undef AC_STD_FLOAT_FX_DIV_OVERRIDE
-
-#endif
 
 #endif

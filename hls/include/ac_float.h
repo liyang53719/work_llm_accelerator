@@ -1,8 +1,3 @@
-#pragma once
-
-#include "include/ac_float.h"
-
-#if 0
 /**************************************************************************
  *                                                                        *
  *  Algorithmic C (tm) Datatypes                                          *
@@ -46,7 +41,7 @@
 #include "ac_fixed.h"
 
 #ifdef __EDG__
-#include "catapult_shims/cmath.h"
+#include "../catapult_shims/cmath.h"
 #elif !defined(__SYNTHESIS__)
 #include <cmath>
 #endif
@@ -1231,5 +1226,3 @@ namespace ac {
 #endif
 
 #endif // __AC_FLOAT_H
-
-#endif

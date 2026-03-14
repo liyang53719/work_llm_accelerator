@@ -110,9 +110,9 @@
 #include <assert.h>
 #endif
 #ifdef __EDG__
-#include "catapult_shims/limits.h"
-#include "catapult_shims/iostream.h"
-#include "catapult_shims/ostream.h"
+#include "../catapult_shims/limits.h"
+#include "../catapult_shims/iostream.h"
+#include "../catapult_shims/ostream.h"
 #else
 #include <limits>
 #ifndef AC_USER_DEFINED_ASSERT
@@ -123,7 +123,7 @@
 #endif
 #include <math.h>
 #ifdef __EDG__
-#include "catapult_shims/string.h"
+#include "../catapult_shims/string.h"
 #else
 #include <string>
 #endif

@@ -5,9 +5,25 @@ set gcc_root $mgc_home/pkgs/dcs_gcc/gcc-10.3.0
 set solution_name qwen_prefill_mlp_kernel_solution
 set top_function qwen_prefill_mlp_kernel
 set clock_period 1.0
+set enable_fp_operator_mapping 0
+set use_legacy_dw_lib 0
+set add_ccs_designware 0
 
 if {[info exists ::env(QWEN_HLS_CLOCK_PERIOD)] && $::env(QWEN_HLS_CLOCK_PERIOD) ne ""} {
 	set clock_period $::env(QWEN_HLS_CLOCK_PERIOD)
+}
+
+if {[info exists ::env(QWEN_HLS_USE_FP_OPERATOR_MAPPING)] && $::env(QWEN_HLS_USE_FP_OPERATOR_MAPPING) ne "0"} {
+	set enable_fp_operator_mapping 1
+}
+
+if {[info exists ::env(QWEN_HLS_USE_LEGACY_DW_LIB)] && $::env(QWEN_HLS_USE_LEGACY_DW_LIB) ne "0"} {
+	set use_legacy_dw_lib 1
+	set enable_fp_operator_mapping 1
+}
+
+if {[info exists ::env(QWEN_HLS_ADD_CCS_DESIGNWARE)] && $::env(QWEN_HLS_ADD_CCS_DESIGNWARE) ne "0"} {
+	set add_ccs_designware 1
 }
 
 set design_files [list \
@@ -28,6 +44,7 @@ foreach design_file $design_files {
 set search_path [join [list \
 	$script_dir \
 	[file join $project_root common] \
+	[file join $project_root include] \
 	[file join $project_root catapult_shims] \
 	$project_root \
 	$mgc_home/shared/include \
@@ -40,6 +57,7 @@ set search_path [join [list \
 set compiler_flags [list \
 	"-I$script_dir" \
 	"-I[file join $project_root common]" \
+	"-I[file join $project_root include]" \
 	"-I[file join $project_root catapult_shims]" \
 	"-I$project_root" \
 	"-I$mgc_home/shared/include" \
@@ -53,6 +71,14 @@ set compiler_flags [list \
 	"-I[file join $gcc_root lib gcc x86_64-linux-gnu 10.3.0 include]" \
 	"-I/usr/include" \
 	"-I/usr/include/x86_64-linux-gnu"]
+
+if {$enable_fp_operator_mapping} {
+	lappend compiler_flags "-DQWEN_CATAPULT_USE_FP_OPERATOR_MAPPING=1"
+}
+
+if {$use_legacy_dw_lib} {
+	lappend compiler_flags "-DUSING_CCS_LEGACY_DW_LIB"
+}
 
 proc emit_general_solution_metrics {} {
 	set general {timing tm_latency_cycles \
@@ -92,6 +118,9 @@ go compile
 
 solution library add nangate-45nm_beh -- -rtlsyntool OasysRTL
 solution library add ccs_sample_mem
+if {$add_ccs_designware} {
+	puts "QWEN_NOTE skipping ccs_designware: current flow uses OasysRTL base libraries; official ccs_designware support requires a compatible DesignCompiler-backed library configuration"
+}
 
 go libraries
 directive set -CLOCKS [list clk [list -CLOCK_PERIOD $clock_period]]

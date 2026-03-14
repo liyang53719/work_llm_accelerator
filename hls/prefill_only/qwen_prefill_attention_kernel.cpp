@@ -1,9 +1,9 @@
 #include "qwen_prefill_attention_kernel.h"
 
 #ifdef __SYNTHESIS__
-#include "../ac_int.h"
-#include "../ac_std_float.h"
-#include "../ccs_dw_fp_lib.h"
+#include "../include/ac_int.h"
+#include "../include/ac_std_float.h"
+#include "../include/ccs_dw_fp_lib.h"
 #endif
 
 namespace {

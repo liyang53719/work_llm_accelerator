@@ -2,11 +2,6 @@
 //==================================================================
 // File: ccs_dw_lib.h
 // Description: provides a C++ interface to Designware(r) FP blocks.
-#pragma once
-
-#include "include/ccs_dw_fp_lib.h"
-
-#if 0
 //
 // BETA version
 //==================================================================
@@ -14,7 +9,22 @@
 #pragma once
 
 #include "ac_std_float.h"
-#include "catapult_shims/iostream.h"
+#include "../catapult_shims/iostream.h"
+
+#ifndef QWEN_CATAPULT_USE_FP_OPERATOR_MAPPING
+#define QWEN_CATAPULT_USE_FP_OPERATOR_MAPPING 0
+#endif
+
+#if defined(USING_CCS_LEGACY_DW_LIB) && QWEN_CATAPULT_USE_FP_OPERATOR_MAPPING
+#define QWEN_CATAPULT_MAP_CCS_DW_OPERATORS 1
+#define QWEN_CATAPULT_MAP_CCS_FP_OPERATORS 0
+#elif QWEN_CATAPULT_USE_FP_OPERATOR_MAPPING
+#define QWEN_CATAPULT_MAP_CCS_DW_OPERATORS 0
+#define QWEN_CATAPULT_MAP_CCS_FP_OPERATORS 1
+#else
+#define QWEN_CATAPULT_MAP_CCS_DW_OPERATORS 0
+#define QWEN_CATAPULT_MAP_CCS_FP_OPERATORS 0
+#endif
 
 namespace std {
 
@@ -129,7 +139,9 @@ void ccs_dw_fp_addsub_sim_model(const ac_std_float<W,E> &a, const ac_std_float<W
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_addsub
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_addsub(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -149,7 +161,9 @@ void ccs_dw_fp_addsub(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_addsub
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_addsub(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -183,7 +197,7 @@ ac_std_float<W,E> fp_addsub(const ac_std_float<W,E> &a, const ac_std_float<W,E> 
   #endif
   ac_int<3,false> rnd = int(QR == AC_TRN_ZERO);
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_addsub<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, op, z);
   #else
   ccs_fp_addsub<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, op, z);
@@ -192,8 +206,6 @@ ac_std_float<W,E> fp_addsub(const ac_std_float<W,E> &a, const ac_std_float<W,E> 
   z_fl.set_data(z);
   return z_fl;
 }
-
-#endif
 
 //-------------------------------------------------------------------------------------------
 // DW_fp_add
@@ -208,7 +220,9 @@ void ccs_dw_fp_add_sim_model(const ac_std_float<W,E> &a, const ac_std_float<W,E>
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_add
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_add(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -227,7 +241,9 @@ void ccs_dw_fp_add(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_add
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_add(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -246,7 +262,9 @@ void ccs_fp_add(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_lp_piped_fp_add
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_lp_piped_fp_add(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -265,7 +283,9 @@ void ccs_dw_lp_piped_fp_add(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_lp_piped_fp_add
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_lp_piped_fp_add(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -298,7 +318,7 @@ ac_std_float<W,E> fp_add(const ac_std_float<W,E> &a, const ac_std_float<W,E> &b)
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_add<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
   #else
   ccs_fp_add<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
@@ -323,7 +343,7 @@ ac_std_float<W,E> lp_piped_fp_add(const ac_std_float<W,E> &a, const ac_std_float
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_lp_piped_fp_add<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
   #else
   ccs_lp_piped_fp_add<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
@@ -345,7 +365,9 @@ void ccs_dw_fp_sub_sim_model(const ac_std_float<W,E> &a, const ac_std_float<W,E>
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_sub
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_sub(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -364,7 +386,9 @@ void ccs_dw_fp_sub(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_sub
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_sub(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -397,7 +421,7 @@ ac_std_float<W,E> fp_sub(const ac_std_float<W,E> &a, const ac_std_float<W,E> &b)
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_sub<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
   #else
   ccs_fp_sub<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
@@ -429,7 +453,9 @@ void ccs_dw_fp_div_sim_model(const ac_std_float<W,E> &a, const ac_std_float<W,E>
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_div
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_div(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -447,7 +473,9 @@ void ccs_dw_fp_div(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_div
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_div(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -465,7 +493,9 @@ void ccs_fp_div(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_lp_piped_fp_div
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_lp_piped_fp_div(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -483,7 +513,9 @@ void ccs_dw_lp_piped_fp_div(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_lp_piped_fp_div
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_lp_piped_fp_div(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -515,7 +547,7 @@ ac_std_float<W,E> fp_div(const ac_std_float<W,E> &a, const ac_std_float<W,E> &b)
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_div<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
   #else
   ccs_fp_div<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
@@ -540,7 +572,7 @@ ac_std_float<W,E> lp_piped_fp_div(const ac_std_float<W,E> &a, const ac_std_float
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_lp_piped_fp_div<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
   #else
   ccs_lp_piped_fp_div<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
@@ -571,7 +603,9 @@ void ccs_dw_fp_mac_sim_model(const ac_std_float<W,E> &a, const ac_std_float<W,E>
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_mac
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_mac(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -592,7 +626,9 @@ void ccs_dw_fp_mac(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_mac
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_mac(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -627,7 +663,7 @@ ac_std_float<W,E> fp_mac(const ac_std_float<W,E> &a, const ac_std_float<W,E> &b,
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_mac<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), c.data_ac_int(), rnd, z);
   #else
   ccs_fp_mac<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), c.data_ac_int(), rnd, z);
@@ -659,7 +695,9 @@ void ccs_dw_fp_mult_sim_model(const ac_std_float<W,E> &a, const ac_std_float<W,E
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_mult
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_mult(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -678,7 +716,9 @@ void ccs_dw_fp_mult(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_mult
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_mult(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -697,7 +737,9 @@ void ccs_fp_mult(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_lp_piped_fp_mult
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_lp_piped_fp_mult(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -716,7 +758,9 @@ void ccs_dw_lp_piped_fp_mult(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_lp_piped_fp_mult
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_lp_piped_fp_mult(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -749,7 +793,7 @@ ac_std_float<W,E> fp_mult(const ac_std_float<W,E> &a, const ac_std_float<W,E> &b
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_mult<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
   #else
   ccs_fp_mult<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
@@ -774,7 +818,7 @@ ac_std_float<W,E> lp_piped_fp_mult(const ac_std_float<W,E> &a, const ac_std_floa
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_lp_piped_fp_mult<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
   #else
   ccs_lp_piped_fp_mult<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), rnd, z);
@@ -807,7 +851,9 @@ void ccs_dw_fp_recip_sim_model(const ac_std_float<W,E> &a, ac_int<3,false> rnd, 
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_recip
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_recip(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -824,7 +870,9 @@ void ccs_dw_fp_recip(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_recip
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_recip(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -841,7 +889,9 @@ void ccs_fp_recip(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_lp_piped_fp_recip
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_lp_piped_fp_recip(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -858,7 +908,9 @@ void ccs_dw_lp_piped_fp_recip(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_lp_piped_fp_recip
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_lp_piped_fp_recip(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -890,7 +942,7 @@ ac_std_float<W,E> fp_recip(const ac_std_float<W,E> &x)
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_recip<sig_width, exp_width, ieee_compliance>(x.data_ac_int(), rnd, z);
   #else
   ccs_fp_recip<sig_width, exp_width, ieee_compliance>(x.data_ac_int(), rnd, z);
@@ -915,7 +967,7 @@ ac_std_float<W,E> lp_piped_fp_recip(const ac_std_float<W,E> &x)
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_lp_piped_fp_recip<sig_width, exp_width, ieee_compliance>(x.data_ac_int(), rnd, z);
   #else
   ccs_lp_piped_fp_recip<sig_width, exp_width, ieee_compliance>(x.data_ac_int(), rnd, z);
@@ -946,7 +998,9 @@ void ccs_dw_fp_sqrt_sim_model(const ac_std_float<W,E> &a, ac_int<3,false> rnd, a
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_sqrt
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_sqrt(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -963,7 +1017,9 @@ void ccs_dw_fp_sqrt(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_sqrt
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_sqrt(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -995,7 +1051,7 @@ ac_std_float<W,E> fp_sqrt(const ac_std_float<W,E> &x)
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_sqrt<sig_width, exp_width, ieee_compliance>(x.data_ac_int(), rnd, z);
   #else
   ccs_fp_sqrt<sig_width, exp_width, ieee_compliance>(x.data_ac_int(), rnd, z);
@@ -1148,7 +1204,9 @@ void ccs_dw_fp_invsqrt_sim_model(const ac_std_float<W,E> &a, ac_int<3,false> rnd
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_invsqrt
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_invsqrt(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -1165,7 +1223,9 @@ void ccs_dw_fp_invsqrt(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_invsqrt
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_invsqrt(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -1196,7 +1256,7 @@ ac_std_float<W,E> fp_invsqrt(const ac_std_float<W,E> &x)
   #endif
   ac_int<3,false> rnd = (QR == AC_TRN_ZERO);
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_invsqrt<sig_width, exp_width, ieee_compliance>(x.data_ac_int(), rnd, z);
   #else
   ccs_fp_invsqrt<sig_width, exp_width, ieee_compliance>(x.data_ac_int(), rnd, z);
@@ -1255,7 +1315,9 @@ void ccs_dw_fp_cmp_sim_model(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_cmp
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_cmp (
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -1280,7 +1342,9 @@ void ccs_dw_fp_cmp (
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_cmp
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_cmp (
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -1321,7 +1385,7 @@ void fp_cmp(
   };
   ac_int<1, false> aeqb, altb, agtb, unordered;
   ac_int<W, true> z0_int, z1_int;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_cmp<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), zctr, aeqb, altb, agtb, unordered, z0_int, z1_int);
   #else
   ccs_fp_cmp<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), zctr, aeqb, altb, agtb, unordered, z0_int, z1_int);
@@ -1636,7 +1700,9 @@ void ccs_dw_fp_sum3_sim_model(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_sum3
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_sum3(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -1657,7 +1723,9 @@ void ccs_dw_fp_sum3(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_sum3
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_sum3(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -1678,7 +1746,9 @@ void ccs_fp_sum3(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_lp_piped_fp_sum3
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_lp_piped_fp_sum3(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -1699,7 +1769,9 @@ void ccs_dw_lp_piped_fp_sum3(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_lp_piped_fp_sum3
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_lp_piped_fp_sum3(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -1745,7 +1817,7 @@ ac_std_float<W,E> fp_sum3(const ac_std_float<W,E> &a, const ac_std_float<W,E> &b
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_sum3<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), c.data_ac_int(), rnd, z);
   #else
   ccs_fp_sum3<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), c.data_ac_int(), rnd, z);
@@ -1770,7 +1842,7 @@ ac_std_float<W,E> lp_piped_fp_sum3(const ac_std_float<W,E> &a, const ac_std_floa
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_lp_piped_fp_sum3<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), c.data_ac_int(), rnd, z);
   #else
   ccs_lp_piped_fp_sum3<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), c.data_ac_int(), rnd, z);
@@ -2205,7 +2277,9 @@ void ccs_dw_fp_sum4_sim_model(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
 #pragma map_to_operator ccs_dw_fp_sum4
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_dw_fp_sum4(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -2228,7 +2302,9 @@ void ccs_dw_fp_sum4(
 }
 
 // Mapped to the operator using ac_int
+#if QWEN_CATAPULT_MAP_CCS_FP_OPERATORS
 #pragma map_to_operator ccs_fp_sum4
+#endif
 template<int sig_width, int exp_width, int ieee_compliance>
 void ccs_fp_sum4(
   const ac_int<sig_width+exp_width+1,true> &a,
@@ -2275,7 +2351,7 @@ ac_std_float<W,E> fp_sum4(const ac_std_float<W,E> &a, const ac_std_float<W,E> &b
   #endif
   ac_int<3,false> rnd = QR == AC_TRN_ZERO;
   ac_int<W,true> z;
-  #ifdef USING_CCS_LEGACY_DW_LIB
+  #if QWEN_CATAPULT_MAP_CCS_DW_OPERATORS
   ccs_dw_fp_sum4<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), c.data_ac_int(), d.data_ac_int(), rnd, z);
   #else
   ccs_fp_sum4<sig_width, exp_width, ieee_compliance>(a.data_ac_int(), b.data_ac_int(), c.data_ac_int(), d.data_ac_int(), rnd, z);

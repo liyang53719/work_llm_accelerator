@@ -6,6 +6,7 @@ applyTo: "hls/**"
 # Catapult Header Resolution Rules
 
 - `work/` 只允许阅读参考，不能作为真实依赖、输出目录或包含路径来源。
+- 本地 AC/FP 兼容头统一放在 `hls/include/`；新增或修改这类头时，不要再散落回 `hls/` 根目录。
 - Catapult/EDG 遇到 `limits.h`、`climits`、`cmath`、`iostream`、`ac_int.h`、`ac_std_float.h`、`ccs_dw_fp_lib.h` 相关问题时，先确认实际命中的是仓库内本地兼容头，而不是 vendor 或系统头。
 - 优先使用显式仓库内包含路径和显式 `.h` shim；不要依赖 `<ac_int.h>` 这类角括号优先级，也不要依赖无扩展名 shim 名字。
 - `limits.h` shim 必须保持自包含实现，不要再尝试 `include_next <limits.h>` 这类递归方案。

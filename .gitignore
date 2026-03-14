@@ -1,6 +1,13 @@
 __pycache__/
 *.pyc
+tmp/
 tmp/host_libs/
 tmp/*.o
+tmp/*.log
 tmp/reference_cases/
 tmp/reference_params/
+Catapult/
+Catapult_*/
+catapult.log
+catapult.pinfo
+work/
