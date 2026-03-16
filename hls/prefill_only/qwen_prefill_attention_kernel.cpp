@@ -280,11 +280,66 @@ void prefill_attention_context_block(
 
 #ifdef __SYNTHESIS__
 
-using catapult_fp_t = ac_std_float<32, 8>;
+using catapult_fp_t = llm_accel::prefill_catapult_fp_t;
 
 constexpr int kFpIeeeCompliance = 0;
-catapult_fp_t g_q_proj_buffer_fp[kPrefillSeqCapacity][llm_accel::kHiddenSize];
-catapult_fp_t g_context_buffer_fp[kPrefillQueryCapacity][llm_accel::kHiddenSize];
+constexpr int kParallelMacLaneCount = llm_accel::kTileN;
+constexpr int kRmsNormChunkCount = llm_accel::kHiddenSize / kParallelMacLaneCount;
+
+#define HLS_DO_1(M, base) M(base)
+#define HLS_DO_2(M, base) HLS_DO_1(M, base) M((base) + 1)
+#define HLS_DO_4(M, base) HLS_DO_2(M, base) HLS_DO_2(M, (base) + 2)
+#define HLS_DO_8(M, base) HLS_DO_4(M, base) HLS_DO_4(M, (base) + 4)
+#define HLS_DO_16(M, base) HLS_DO_8(M, base) HLS_DO_8(M, (base) + 8)
+#define HLS_DO_32(M, base) HLS_DO_16(M, base) HLS_DO_16(M, (base) + 16)
+#define HLS_DO_64(M, base) HLS_DO_32(M, base) HLS_DO_32(M, (base) + 32)
+#define HLS_DO_128(M, base) HLS_DO_64(M, base) HLS_DO_64(M, (base) + 64)
+
+inline catapult_fp_t fp_add_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs);
+inline catapult_fp_t fp_mul_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs);
+inline catapult_fp_t fp_zero();
+catapult_fp_t reduce_sum_128_fp(catapult_fp_t values[kParallelMacLaneCount]);
+void rmsnorm_square_chunk_fp(
+    const catapult_fp_t input[llm_accel::kHiddenSize],
+    int base_index,
+    catapult_fp_t lane_square[kParallelMacLaneCount]);
+void rmsnorm_scale_weight_chunk_fp(
+    const catapult_fp_t weight[llm_accel::kHiddenSize],
+    const catapult_fp_t& inv_rms,
+    int base_index,
+    catapult_fp_t scaled_weight[llm_accel::kHiddenSize]);
+void rmsnorm_apply_scale_chunk_fp(
+    const catapult_fp_t input[llm_accel::kHiddenSize],
+    const catapult_fp_t scaled_weight[llm_accel::kHiddenSize],
+    int base_index,
+    catapult_fp_t output[llm_accel::kHiddenSize]);
+catapult_fp_t dequantized_weight_fp(
+  const llm_accel::packed_w4_t* packed_weights,
+  const catapult_fp_t* scales,
+  int out_index,
+  int in_index,
+  int in_dim);
+
+void weighted_chunk_128_fp(
+    const catapult_fp_t* input_tile,
+    const llm_accel::packed_w4_t* packed_weights,
+    const catapult_fp_t* scales,
+    int out_index,
+    int in_index_base,
+    int in_dim,
+    int lane_extent,
+    catapult_fp_t lane_products[kParallelMacLaneCount]) {
+#pragma hls_unroll yes
+  for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
+    if (lane < lane_extent) {
+      lane_products[lane] = fp_mul_op(
+          input_tile[lane],
+          dequantized_weight_fp(packed_weights, scales, out_index, in_index_base + lane, in_dim));
+    } else {
+      lane_products[lane] = fp_zero();
+    }
+  }
+}
 
 inline catapult_fp_t fp_const(float value) {
   return catapult_fp_t(value);
@@ -365,6 +420,7 @@ catapult_fp_t approx_exp_fp(const catapult_fp_t& value) {
 
   int half_steps = 0;
   catapult_fp_t scaled = value;
+#pragma hls_unroll yes
   for (int step = 0; step < 6; ++step) {
     if (!fp_lt_op(scaled, neg_one)) {
       break;
@@ -375,15 +431,74 @@ catapult_fp_t approx_exp_fp(const catapult_fp_t& value) {
 
   catapult_fp_t term = fp_one();
   catapult_fp_t series = fp_one();
-  for (int degree = 1; degree <= 6; ++degree) {
-    term = fp_mul_op(term, fp_div_op(scaled, fp_const_int(degree)));
-    series = fp_add_op(series, term);
+  term = fp_mul_op(term, scaled);
+  series = fp_add_op(series, term);
+  term = fp_mul_op(term, fp_mul_op(scaled, fp_const(0.5f)));
+  series = fp_add_op(series, term);
+  term = fp_mul_op(term, fp_mul_op(scaled, fp_const(1.0f / 3.0f)));
+  series = fp_add_op(series, term);
+  term = fp_mul_op(term, fp_mul_op(scaled, fp_const(0.25f)));
+  series = fp_add_op(series, term);
+  term = fp_mul_op(term, fp_mul_op(scaled, fp_const(0.2f)));
+  series = fp_add_op(series, term);
+  term = fp_mul_op(term, fp_mul_op(scaled, fp_const(1.0f / 6.0f)));
+  series = fp_add_op(series, term);
+
+  if (half_steps == 0) {
+    return series;
+  }
+  catapult_fp_t squared = fp_mul_op(series, series);
+  if (half_steps == 1) {
+    return squared;
+  }
+  squared = fp_mul_op(squared, squared);
+  if (half_steps == 2) {
+    return squared;
+  }
+  squared = fp_mul_op(squared, squared);
+  if (half_steps == 3) {
+    return squared;
+  }
+  squared = fp_mul_op(squared, squared);
+  if (half_steps == 4) {
+    return squared;
+  }
+  squared = fp_mul_op(squared, squared);
+  if (half_steps == 5) {
+    return squared;
+  }
+  return fp_mul_op(squared, squared);
+}
+
+catapult_fp_t approx_rsqrt_fp(const catapult_fp_t& value) {
+  if (fp_le_op(value, fp_zero())) {
+    return fp_zero();
   }
 
-  for (int step = 0; step < half_steps; ++step) {
-    series = fp_mul_op(series, series);
-  }
-  return series;
+  const catapult_fp_t half = fp_const(0.5f);
+  const catapult_fp_t three_halves = fp_const(1.5f);
+  const ac_int<32, false> value_bits = value.data_ac_int();
+  const ac_int<32, false> guess_bits = ac_int<32, false>(0x5f3759dfU) - (value_bits >> 1);
+
+  catapult_fp_t guess;
+  guess.set_data(guess_bits);
+
+  catapult_fp_t guess_sq = fp_mul_op(guess, guess);
+  catapult_fp_t correction = fp_sub_op(three_halves, fp_mul_op(fp_mul_op(half, value), guess_sq));
+  guess = fp_mul_op(guess, correction);
+
+  guess_sq = fp_mul_op(guess, guess);
+  correction = fp_sub_op(three_halves, fp_mul_op(fp_mul_op(half, value), guess_sq));
+  guess = fp_mul_op(guess, correction);
+
+  guess_sq = fp_mul_op(guess, guess);
+  correction = fp_sub_op(three_halves, fp_mul_op(fp_mul_op(half, value), guess_sq));
+  return fp_mul_op(guess, correction);
+}
+
+inline catapult_fp_t approx_reciprocal_fp(const catapult_fp_t& value) {
+  const catapult_fp_t inv_sqrt = approx_rsqrt_fp(value);
+  return fp_mul_op(inv_sqrt, inv_sqrt);
 }
 
 catapult_fp_t wrap_angle_fp(const catapult_fp_t& angle) {
@@ -391,12 +506,14 @@ catapult_fp_t wrap_angle_fp(const catapult_fp_t& angle) {
   const catapult_fp_t pi = fp_const(3.14159265358979323846f);
   const catapult_fp_t two_pi = fp_const(6.28318530717958647692f);
 
+ #pragma hls_unroll yes
   for (int iter = 0; iter < 32; ++iter) {
     if (!fp_gt_op(reduced, pi)) {
       break;
     }
     reduced = fp_sub_op(reduced, two_pi);
   }
+ #pragma hls_unroll yes
   for (int iter = 0; iter < 32; ++iter) {
     if (!fp_lt_op(reduced, fp_sub_op(fp_zero(), pi))) {
       break;
@@ -435,26 +552,60 @@ void approx_sincos_fp(const catapult_fp_t& angle, catapult_fp_t* sin_value, cata
   *cos_value = fp_mul_op(cos_sign, cos_poly);
 }
 
+catapult_fp_t reduce_sum_128_fp(catapult_fp_t values[kParallelMacLaneCount]);
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+catapult_fp_t rmsnorm_square_sum_fp(
+    const catapult_fp_t input[llm_accel::kHiddenSize]) {
+  catapult_fp_t square_sum = fp_zero();
+  for (int chunk_index = 0; chunk_index < kRmsNormChunkCount; ++chunk_index) {
+    catapult_fp_t lane_square[kParallelMacLaneCount];
+    rmsnorm_square_chunk_fp(input, chunk_index * kParallelMacLaneCount, lane_square);
+    square_sum = fp_add_op(square_sum, reduce_sum_128_fp(lane_square));
+  }
+  return square_sum;
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void rmsnorm_scale_weight_fp(
+    const catapult_fp_t weight[llm_accel::kHiddenSize],
+    const catapult_fp_t& inv_rms,
+    catapult_fp_t scaled_weight[llm_accel::kHiddenSize]) {
+  for (int chunk_index = 0; chunk_index < kRmsNormChunkCount; ++chunk_index) {
+    rmsnorm_scale_weight_chunk_fp(weight, inv_rms, chunk_index * kParallelMacLaneCount, scaled_weight);
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void rmsnorm_apply_scale_fp(
+    const catapult_fp_t input[llm_accel::kHiddenSize],
+    const catapult_fp_t scaled_weight[llm_accel::kHiddenSize],
+    catapult_fp_t output[llm_accel::kHiddenSize]) {
+  for (int chunk_index = 0; chunk_index < kRmsNormChunkCount; ++chunk_index) {
+    rmsnorm_apply_scale_chunk_fp(input, scaled_weight, chunk_index * kParallelMacLaneCount, output);
+  }
+}
+
 void rmsnorm_token_fp(
-    const catapult_fp_t* input,
-    const catapult_fp_t* weight,
+    const catapult_fp_t input[llm_accel::kHiddenSize],
+    const catapult_fp_t weight[llm_accel::kHiddenSize],
     const catapult_fp_t& rms_eps,
-    catapult_fp_t* output) {
-  catapult_fp_t mean_square = fp_zero();
-  for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
-    mean_square = fp_mac_op(input[dim], input[dim], mean_square);
-  }
-  mean_square = fp_div_op(mean_square, fp_const_int(llm_accel::kHiddenSize));
-  const catapult_fp_t inv_rms = fp_div_op(fp_one(), fp_sqrt_op(fp_add_op(mean_square, rms_eps)));
-  for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
-    output[dim] = fp_mul_op(fp_mul_op(input[dim], inv_rms), weight[dim]);
-  }
+    catapult_fp_t output[llm_accel::kHiddenSize]) {
+  catapult_fp_t scaled_weight[llm_accel::kHiddenSize];
+  const catapult_fp_t mean_square = fp_mul_op(rmsnorm_square_sum_fp(input), fp_const(1.0f / 1536.0f));
+  const catapult_fp_t inv_rms = approx_rsqrt_fp(fp_add_op(mean_square, rms_eps));
+  rmsnorm_scale_weight_fp(weight, inv_rms, scaled_weight);
+  rmsnorm_apply_scale_fp(input, scaled_weight, output);
 }
 
 void apply_rope_inplace_fp(catapult_fp_t* head, int token_index) {
   catapult_fp_t inv_freq = fp_one();
   const catapult_fp_t token_index_fp = fp_const_int(token_index);
   const catapult_fp_t rope_step = fp_const(0.8058421877614801f);
+#pragma hls_unroll yes
   for (int pair = 0; pair < llm_accel::kHeadDim / 2; ++pair) {
     const catapult_fp_t angle = fp_mul_op(token_index_fp, inv_freq);
     catapult_fp_t sinv = fp_zero();
@@ -488,50 +639,319 @@ catapult_fp_t dequantized_weight_fp(
   return fp_mul_op(decode_int4_weight_fp(packed_value, high_nibble), scales[out_index]);
 }
 
-void project_tiled_token_fp(
+catapult_fp_t reduce_sum_128_fp(catapult_fp_t values[kParallelMacLaneCount]) {
+  catapult_fp_t stage64[kParallelMacLaneCount / 2];
+  catapult_fp_t stage32[kParallelMacLaneCount / 4];
+  catapult_fp_t stage16[kParallelMacLaneCount / 8];
+  catapult_fp_t stage8[kParallelMacLaneCount / 16];
+  catapult_fp_t stage4[kParallelMacLaneCount / 32];
+  catapult_fp_t stage2[kParallelMacLaneCount / 64];
+
+#define REDUCE_STAGE64(i) stage64[i] = fp_add_op(values[(i) * 2], values[(i) * 2 + 1]);
+  HLS_DO_64(REDUCE_STAGE64, 0)
+#undef REDUCE_STAGE64
+
+#define REDUCE_STAGE32(i) stage32[i] = fp_add_op(stage64[(i) * 2], stage64[(i) * 2 + 1]);
+  HLS_DO_32(REDUCE_STAGE32, 0)
+#undef REDUCE_STAGE32
+
+#define REDUCE_STAGE16(i) stage16[i] = fp_add_op(stage32[(i) * 2], stage32[(i) * 2 + 1]);
+  HLS_DO_16(REDUCE_STAGE16, 0)
+#undef REDUCE_STAGE16
+
+#define REDUCE_STAGE8(i) stage8[i] = fp_add_op(stage16[(i) * 2], stage16[(i) * 2 + 1]);
+  HLS_DO_8(REDUCE_STAGE8, 0)
+#undef REDUCE_STAGE8
+
+#define REDUCE_STAGE4(i) stage4[i] = fp_add_op(stage8[(i) * 2], stage8[(i) * 2 + 1]);
+  HLS_DO_4(REDUCE_STAGE4, 0)
+#undef REDUCE_STAGE4
+
+#define REDUCE_STAGE2(i) stage2[i] = fp_add_op(stage4[(i) * 2], stage4[(i) * 2 + 1]);
+  HLS_DO_2(REDUCE_STAGE2, 0)
+#undef REDUCE_STAGE2
+
+  return fp_add_op(stage2[0], stage2[1]);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void rmsnorm_square_chunk_fp(
+    const catapult_fp_t input[llm_accel::kHiddenSize],
+    int base_index,
+    catapult_fp_t lane_square[kParallelMacLaneCount]) {
+#pragma hls_unroll yes
+  for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
+    const catapult_fp_t value = input[base_index + lane];
+    lane_square[lane] = fp_mul_op(value, value);
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void rmsnorm_scale_weight_chunk_fp(
+    const catapult_fp_t weight[llm_accel::kHiddenSize],
+    const catapult_fp_t& inv_rms,
+    int base_index,
+    catapult_fp_t scaled_weight[llm_accel::kHiddenSize]) {
+#pragma hls_unroll yes
+  for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
+    scaled_weight[base_index + lane] = fp_mul_op(weight[base_index + lane], inv_rms);
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void rmsnorm_apply_scale_chunk_fp(
+    const catapult_fp_t input[llm_accel::kHiddenSize],
+    const catapult_fp_t scaled_weight[llm_accel::kHiddenSize],
+    int base_index,
+    catapult_fp_t output[llm_accel::kHiddenSize]) {
+#pragma hls_unroll yes
+  for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
+    const int index = base_index + lane;
+    output[index] = fp_mul_op(input[index], scaled_weight[index]);
+  }
+}
+
+catapult_fp_t dot_product_128_fp(const catapult_fp_t* lhs, const catapult_fp_t* rhs) {
+  catapult_fp_t lane_products[kParallelMacLaneCount];
+#define DOT_LANE(i) lane_products[i] = fp_mul_op(lhs[i], rhs[i]);
+  HLS_DO_128(DOT_LANE, 0)
+#undef DOT_LANE
+  return reduce_sum_128_fp(lane_products);
+}
+
+inline void zero_head_accum_128_fp(catapult_fp_t* accum_head) {
+#define ZERO_ACCUM_LANE(i) accum_head[i] = fp_zero();
+  HLS_DO_128(ZERO_ACCUM_LANE, 0)
+#undef ZERO_ACCUM_LANE
+}
+
+catapult_fp_t weighted_chunk_dot_fp(
+    const catapult_fp_t* input_tile,
+    const llm_accel::packed_w4_t* packed_weights,
+    const catapult_fp_t* scales,
+    int out_index,
+    int in_index_base,
+    int in_dim,
+    int lane_extent) {
+  catapult_fp_t lane_products[kParallelMacLaneCount];
+  weighted_chunk_128_fp(
+      input_tile,
+      packed_weights,
+      scales,
+      out_index,
+      in_index_base,
+      in_dim,
+      lane_extent,
+      lane_products);
+  return reduce_sum_128_fp(lane_products);
+}
+
+void scaled_accum_128_fp(const catapult_fp_t& scale, const catapult_fp_t* vector, catapult_fp_t* accum) {
+#pragma hls_unroll yes
+  for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
+    accum[dim] = fp_mac_op(scale, vector[dim], accum[dim]);
+  }
+}
+
+void scale_store_128_fp(const catapult_fp_t* accum, const catapult_fp_t& scale, catapult_fp_t* output) {
+#pragma hls_unroll yes
+  for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
+    output[dim] = fp_mul_op(accum[dim], scale);
+  }
+}
+
+void attention_max_score_pass_fp(
+    const catapult_fp_t* q_token,
+    const catapult_fp_t* k_proj,
+    int seq_len,
+    int query_index,
+    int key_tile,
+    int head_base,
+    int head_end,
+    catapult_fp_t max_score[llm_accel::kNumAttentionHeads]) {
+  const catapult_fp_t attention_scaling = fp_const(0.08838834764831845f);
+
+  for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
+    const int query_limit = query_index + 1;
+    const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
+ATTN_CONTEXT_MAX_KEY_LOOP:
+#pragma hls_pipeline_init_interval 2
+    for (int key_index = key_begin; key_index < key_end; ++key_index) {
+#pragma hls_unroll yes
+      for (int head = head_base; head < head_end; ++head) {
+        const int head_offset = head - head_base;
+        const int kv_head = head / kNumGroups;
+        const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
+        const catapult_fp_t* k_head = k_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
+        const catapult_fp_t score = dot_product_128_fp(q_head, k_head);
+        const catapult_fp_t scaled_score = fp_mul_op(score, attention_scaling);
+        if (fp_gt_op(scaled_score, max_score[head_offset])) {
+          max_score[head_offset] = scaled_score;
+        }
+      }
+    }
+  }
+}
+
+void attention_value_accum_pass_fp(
+    const catapult_fp_t* q_token,
+    const catapult_fp_t* k_proj,
+    const catapult_fp_t* v_proj,
+    int seq_len,
+    int query_index,
+    int key_tile,
+    int head_base,
+    int head_end,
+    const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
+    catapult_fp_t denom[llm_accel::kNumAttentionHeads],
+    catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
+  const catapult_fp_t attention_scaling = fp_const(0.08838834764831845f);
+
+  for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
+    const int query_limit = query_index + 1;
+    const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
+ATTN_CONTEXT_VALUE_KEY_LOOP:
+#pragma hls_pipeline_init_interval 2
+    for (int key_index = key_begin; key_index < key_end; ++key_index) {
+#pragma hls_unroll yes
+      for (int head = head_base; head < head_end; ++head) {
+        const int head_offset = head - head_base;
+        const int kv_head = head / kNumGroups;
+        const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
+        const catapult_fp_t* k_head = k_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
+        const catapult_fp_t* v_head = v_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
+        const catapult_fp_t score = dot_product_128_fp(q_head, k_head);
+        const catapult_fp_t exp_score = approx_exp_fp(
+            fp_sub_op(fp_mul_op(score, attention_scaling), max_score[head_offset]));
+        denom[head_offset] = fp_add_op(denom[head_offset], exp_score);
+        scaled_accum_128_fp(exp_score, v_head, accum[head_offset]);
+      }
+    }
+  }
+}
+
+template <bool HasBias, int OutDim, int InDim>
+void project_tiled_token_fp_impl(
     const catapult_fp_t* input_token,
     const llm_accel::packed_w4_t* packed_weights,
     const catapult_fp_t* bias,
     const catapult_fp_t* scales,
-    int out_dim,
-    int in_dim,
     int out_tile,
     int in_tile,
     catapult_fp_t* output) {
   catapult_fp_t input_tile[kProjectionTileCapacity];
   catapult_fp_t partial_sum[kProjectionTileCapacity];
 
-  for (int out_base = 0; out_base < out_dim; out_base += out_tile) {
-    const int out_extent = min_int(out_tile, out_dim - out_base);
+  for (int out_base = 0; out_base < OutDim; out_base += out_tile) {
+    const int out_extent = min_int(out_tile, OutDim - out_base);
+ATTN_PROJ_INIT_LOOP:
+#pragma hls_pipeline_init_interval 1
     for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
-      partial_sum[out_offset] = bias == nullptr ? fp_zero() : bias[out_base + out_offset];
+      partial_sum[out_offset] = HasBias ? bias[out_base + out_offset] : fp_zero();
     }
 
-    for (int in_base = 0; in_base < in_dim; in_base += in_tile) {
-      const int in_extent = min_int(in_tile, in_dim - in_base);
+    for (int in_base = 0; in_base < InDim; in_base += in_tile) {
+      const int in_extent = min_int(in_tile, InDim - in_base);
+ATTN_PROJ_LOAD_LOOP:
+#pragma hls_pipeline_init_interval 1
       for (int in_offset = 0; in_offset < in_extent; ++in_offset) {
         input_tile[in_offset] = input_token[in_base + in_offset];
       }
 
+ATTN_PROJ_ACCUM_LOOP:
+#pragma hls_pipeline_init_interval 2
       for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
         const int out_index = out_base + out_offset;
         catapult_fp_t accum = partial_sum[out_offset];
-        for (int in_offset = 0; in_offset < in_extent; ++in_offset) {
-          accum = fp_mac_op(
-              input_tile[in_offset],
-              dequantized_weight_fp(packed_weights, scales, out_index, in_base + in_offset, in_dim),
-              accum);
+        for (int in_offset = 0; in_offset < in_extent; in_offset += kParallelMacLaneCount) {
+          const int lane_extent = min_int(kParallelMacLaneCount, in_extent - in_offset);
+          accum = fp_add_op(
+              accum,
+              weighted_chunk_dot_fp(
+                  input_tile + in_offset,
+                  packed_weights,
+                  scales,
+                  out_index,
+                  in_base + in_offset,
+                  InDim,
+                  lane_extent));
         }
         partial_sum[out_offset] = accum;
       }
     }
 
+ATTN_PROJ_STORE_LOOP:
+#pragma hls_pipeline_init_interval 1
     for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
       output[out_base + out_offset] = partial_sum[out_offset];
     }
   }
 }
 
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void project_hidden_token_bias_fp(
+    const catapult_fp_t input_token[llm_accel::kHiddenSize],
+    const llm_accel::packed_w4_t packed_weights[llm_accel::kHiddenSize * llm_accel::kHiddenSize / 2],
+    const catapult_fp_t bias[llm_accel::kHiddenSize],
+    const catapult_fp_t scales[llm_accel::kHiddenSize],
+    int out_tile,
+    int in_tile,
+    catapult_fp_t output[llm_accel::kHiddenSize]) {
+  project_tiled_token_fp_impl<true, llm_accel::kHiddenSize, llm_accel::kHiddenSize>(
+      input_token,
+      packed_weights,
+      bias,
+      scales,
+      out_tile,
+      in_tile,
+      output);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void project_kv_token_bias_fp(
+    const catapult_fp_t input_token[llm_accel::kHiddenSize],
+    const llm_accel::packed_w4_t packed_weights[kKvWidth * llm_accel::kHiddenSize / 2],
+    const catapult_fp_t bias[kKvWidth],
+    const catapult_fp_t scales[kKvWidth],
+    int out_tile,
+    int in_tile,
+    catapult_fp_t output[kKvWidth]) {
+  project_tiled_token_fp_impl<true, kKvWidth, llm_accel::kHiddenSize>(
+      input_token,
+      packed_weights,
+      bias,
+      scales,
+      out_tile,
+      in_tile,
+      output);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void project_hidden_token_fp(
+    const catapult_fp_t input_token[llm_accel::kHiddenSize],
+    const llm_accel::packed_w4_t packed_weights[llm_accel::kHiddenSize * llm_accel::kHiddenSize / 2],
+    const catapult_fp_t scales[llm_accel::kHiddenSize],
+    int out_tile,
+    int in_tile,
+    catapult_fp_t output[llm_accel::kHiddenSize]) {
+  project_tiled_token_fp_impl<false, llm_accel::kHiddenSize, llm_accel::kHiddenSize>(
+      input_token,
+      packed_weights,
+      nullptr,
+      scales,
+      out_tile,
+      in_tile,
+      output);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
 void prefill_attention_context_block_fp(
     const catapult_fp_t q_proj[kPrefillSeqCapacity][llm_accel::kHiddenSize],
     const catapult_fp_t* k_proj,
@@ -543,7 +963,6 @@ void prefill_attention_context_block_fp(
     catapult_fp_t context[kPrefillQueryCapacity][llm_accel::kHiddenSize]) {
   const int key_tile = max_int(1, tile_config.key);
   const int query_heads_parallel = max_int(1, tile_config.query_heads_parallel);
-  const catapult_fp_t attention_scaling = fp_const(0.08838834764831845f);
 
   for (int query_index = query_begin; query_index < query_end; ++query_index) {
     const catapult_fp_t* q_token = q_proj[query_index];
@@ -555,68 +974,35 @@ void prefill_attention_context_block_fp(
       catapult_fp_t denom[llm_accel::kNumAttentionHeads];
       catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim];
 
+    #pragma hls_unroll yes
       for (int head_offset = 0; head_offset < head_end - head_base; ++head_offset) {
         max_score[head_offset] = fp_const(-1.0e30f);
         denom[head_offset] = fp_zero();
-        for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-          accum[head_offset][dim] = fp_zero();
-        }
+        zero_head_accum_128_fp(accum[head_offset]);
       }
 
-      for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
-        const int query_limit = query_index + 1;
-        const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
-        for (int head = head_base; head < head_end; ++head) {
-          const int head_offset = head - head_base;
-          const int kv_head = head / kNumGroups;
-          const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
-          for (int key_index = key_begin; key_index < key_end; ++key_index) {
-            const catapult_fp_t* k_head = k_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
-            catapult_fp_t score = fp_zero();
-            for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-              score = fp_mac_op(q_head[dim], k_head[dim], score);
-            }
-            const catapult_fp_t scaled_score = fp_mul_op(score, attention_scaling);
-            if (fp_gt_op(scaled_score, max_score[head_offset])) {
-              max_score[head_offset] = scaled_score;
-            }
-          }
-        }
-      }
+      attention_max_score_pass_fp(q_token, k_proj, seq_len, query_index, key_tile, head_base, head_end, max_score);
+      attention_value_accum_pass_fp(
+          q_token,
+          k_proj,
+          v_proj,
+          seq_len,
+          query_index,
+          key_tile,
+          head_base,
+          head_end,
+          max_score,
+          denom,
+          accum);
 
-      for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
-        const int query_limit = query_index + 1;
-        const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
-        for (int head = head_base; head < head_end; ++head) {
-          const int head_offset = head - head_base;
-          const int kv_head = head / kNumGroups;
-          const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
-          for (int key_index = key_begin; key_index < key_end; ++key_index) {
-            const catapult_fp_t* k_head = k_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
-            const catapult_fp_t* v_head = v_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
-            catapult_fp_t score = fp_zero();
-            for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-              score = fp_mac_op(q_head[dim], k_head[dim], score);
-            }
-            const catapult_fp_t exp_score = approx_exp_fp(
-                fp_sub_op(fp_mul_op(score, attention_scaling), max_score[head_offset]));
-            denom[head_offset] = fp_add_op(denom[head_offset], exp_score);
-            for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-              accum[head_offset][dim] = fp_mac_op(exp_score, v_head[dim], accum[head_offset][dim]);
-            }
-          }
-        }
-      }
-
+#pragma hls_unroll yes
       for (int head = head_base; head < head_end; ++head) {
         const int head_offset = head - head_base;
         catapult_fp_t* context_head = context_token + head * llm_accel::kHeadDim;
         const catapult_fp_t inv_denom = fp_gt_op(denom[head_offset], fp_zero())
-            ? fp_div_op(fp_one(), denom[head_offset])
+            ? approx_reciprocal_fp(denom[head_offset])
             : fp_zero();
-        for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-          context_head[dim] = fp_mul_op(accum[head_offset][dim], inv_denom);
-        }
+        scale_store_128_fp(accum[head_offset], inv_denom, context_head);
       }
     }
   }
@@ -758,7 +1144,413 @@ KernelStatus qwen_prefill_attention_kernel(
 
 #ifdef __SYNTHESIS__
 
-#pragma hls_design top
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_input_norm_stage_catapult(
+    const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const catapult_fp_t input_layernorm_weight[kHiddenSize],
+    catapult_fp_t rms_eps,
+    catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize]) {
+  const int seq_tile = max_int(1, tile_config.seq);
+
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = min_int(seq_len, token_begin + seq_tile);
+ATTN_TOKEN_NORM_LOOP:
+#pragma hls_pipeline_init_interval 4
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      const int token_offset = token_index * llm_accel::kHiddenSize;
+      rmsnorm_token_fp(input_sequence + token_offset, input_layernorm_weight, rms_eps, normalized_sequence[token_index]);
+    }
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_q_projection_stage_catapult(
+    const catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const catapult_fp_t q_bias[kHiddenSize],
+    const catapult_fp_t q_scales[kHiddenSize],
+    catapult_fp_t q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize]) {
+  const int seq_tile = max_int(1, tile_config.seq);
+
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = min_int(seq_len, token_begin + seq_tile);
+ATTN_Q_PROJ_LOOP:
+#pragma hls_pipeline_init_interval 4
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      const catapult_fp_t* normalized_token = normalized_sequence[token_index];
+      catapult_fp_t* q_proj_token = q_proj_buffer[token_index];
+      project_hidden_token_bias_fp(
+          normalized_token,
+          q_packed_weights,
+          q_bias,
+          q_scales,
+          tile_config.hidden_proj,
+          tile_config.hidden_proj,
+          q_proj_token);
+    }
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_k_projection_stage_catapult(
+    const catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const packed_w4_t k_packed_weights[kKvWidth * kHiddenSize / 2],
+    const catapult_fp_t k_bias[kKvWidth],
+    const catapult_fp_t k_scales[kKvWidth],
+    catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth]) {
+  const int seq_tile = max_int(1, tile_config.seq);
+
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = min_int(seq_len, token_begin + seq_tile);
+ATTN_K_PROJ_LOOP:
+#pragma hls_pipeline_init_interval 4
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      const catapult_fp_t* normalized_token = normalized_sequence[token_index];
+      catapult_fp_t* k_proj_token = k_cache + token_index * kKvWidth;
+      project_kv_token_bias_fp(
+          normalized_token,
+          k_packed_weights,
+          k_bias,
+          k_scales,
+          tile_config.kv_proj,
+          tile_config.hidden_proj,
+          k_proj_token);
+    }
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_v_projection_stage_catapult(
+    const catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const packed_w4_t v_packed_weights[kKvWidth * kHiddenSize / 2],
+    const catapult_fp_t v_bias[kKvWidth],
+    const catapult_fp_t v_scales[kKvWidth],
+    catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth]) {
+  const int seq_tile = max_int(1, tile_config.seq);
+
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = min_int(seq_len, token_begin + seq_tile);
+ATTN_V_PROJ_LOOP:
+#pragma hls_pipeline_init_interval 4
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      const catapult_fp_t* normalized_token = normalized_sequence[token_index];
+      catapult_fp_t* v_proj_token = v_cache + token_index * kKvWidth;
+      project_kv_token_bias_fp(
+          normalized_token,
+          v_packed_weights,
+          v_bias,
+          v_scales,
+          tile_config.kv_proj,
+          tile_config.hidden_proj,
+          v_proj_token);
+    }
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_kv_projection_stage_catapult(
+    const catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const packed_w4_t k_packed_weights[kKvWidth * kHiddenSize / 2],
+    const packed_w4_t v_packed_weights[kKvWidth * kHiddenSize / 2],
+    const catapult_fp_t k_bias[kKvWidth],
+    const catapult_fp_t v_bias[kKvWidth],
+    const catapult_fp_t k_scales[kKvWidth],
+    const catapult_fp_t v_scales[kKvWidth],
+    catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth],
+    catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth]) {
+  qwen_prefill_attention_k_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      k_packed_weights,
+      k_bias,
+      k_scales,
+      k_cache);
+  qwen_prefill_attention_v_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      v_packed_weights,
+      v_bias,
+      v_scales,
+      v_cache);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_qkv_projection_stage_catapult(
+    const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const catapult_fp_t input_layernorm_weight[kHiddenSize],
+    catapult_fp_t rms_eps,
+    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const packed_w4_t k_packed_weights[kKvWidth * kHiddenSize / 2],
+    const packed_w4_t v_packed_weights[kKvWidth * kHiddenSize / 2],
+    const catapult_fp_t q_bias[kHiddenSize],
+    const catapult_fp_t k_bias[kKvWidth],
+    const catapult_fp_t v_bias[kKvWidth],
+    const catapult_fp_t q_scales[kHiddenSize],
+    const catapult_fp_t k_scales[kKvWidth],
+    const catapult_fp_t v_scales[kKvWidth],
+    catapult_fp_t q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth],
+    catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth]) {
+  catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize];
+
+  qwen_prefill_attention_input_norm_stage_catapult(
+      input_sequence,
+      seq_len,
+      tile_config,
+      input_layernorm_weight,
+      rms_eps,
+      normalized_sequence);
+  qwen_prefill_attention_q_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      q_packed_weights,
+      q_bias,
+      q_scales,
+      q_proj_buffer);
+  qwen_prefill_attention_k_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      k_packed_weights,
+      k_bias,
+      k_scales,
+      k_cache);
+  qwen_prefill_attention_v_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      v_packed_weights,
+      v_bias,
+      v_scales,
+      v_cache);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_q_rope_stage_catapult(
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    catapult_fp_t q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize]) {
+  const int seq_tile = max_int(1, tile_config.seq);
+
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = min_int(seq_len, token_begin + seq_tile);
+ATTN_Q_ROPE_TOKEN_LOOP:
+#pragma hls_pipeline_init_interval 4
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      catapult_fp_t* q_proj_token = q_proj_buffer[token_index];
+
+      for (int head_base = 0; head_base < kNumAttentionHeads; head_base += tile_config.query_heads_parallel) {
+        const int head_end = min_int(kNumAttentionHeads, head_base + tile_config.query_heads_parallel);
+#pragma hls_unroll yes
+        for (int head = head_base; head < head_end; ++head) {
+          apply_rope_inplace_fp(q_proj_token + head * kHeadDim, token_index);
+        }
+      }
+    }
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_k_rope_stage_catapult(
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth]) {
+  const int seq_tile = max_int(1, tile_config.seq);
+
+  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
+    const int token_end = min_int(seq_len, token_begin + seq_tile);
+ATTN_K_ROPE_TOKEN_LOOP:
+#pragma hls_pipeline_init_interval 2
+    for (int token_index = token_begin; token_index < token_end; ++token_index) {
+      catapult_fp_t* k_proj_token = k_cache + token_index * kKvWidth;
+
+      for (int head_base = 0; head_base < kNumKeyValueHeads; head_base += tile_config.kv_heads_parallel) {
+        const int head_end = min_int(kNumKeyValueHeads, head_base + tile_config.kv_heads_parallel);
+#pragma hls_unroll yes
+        for (int head = head_base; head < head_end; ++head) {
+          apply_rope_inplace_fp(k_proj_token + head * kHeadDim, token_index);
+        }
+      }
+    }
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_rope_apply_stage_catapult(
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    catapult_fp_t q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth]) {
+  qwen_prefill_attention_q_rope_stage_catapult(seq_len, tile_config, q_proj_buffer);
+  qwen_prefill_attention_k_rope_stage_catapult(seq_len, tile_config, k_cache);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_qkv_rope_stage_catapult(
+    const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const catapult_fp_t input_layernorm_weight[kHiddenSize],
+    catapult_fp_t rms_eps,
+    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const packed_w4_t k_packed_weights[kKvWidth * kHiddenSize / 2],
+    const packed_w4_t v_packed_weights[kKvWidth * kHiddenSize / 2],
+    const catapult_fp_t q_bias[kHiddenSize],
+    const catapult_fp_t k_bias[kKvWidth],
+    const catapult_fp_t v_bias[kKvWidth],
+    const catapult_fp_t q_scales[kHiddenSize],
+    const catapult_fp_t k_scales[kKvWidth],
+    const catapult_fp_t v_scales[kKvWidth],
+    catapult_fp_t q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth],
+    catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth]) {
+  catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize];
+
+  qwen_prefill_attention_input_norm_stage_catapult(
+      input_sequence,
+      seq_len,
+      tile_config,
+      input_layernorm_weight,
+      rms_eps,
+      normalized_sequence);
+  qwen_prefill_attention_q_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      q_packed_weights,
+      q_bias,
+      q_scales,
+      q_proj_buffer);
+    qwen_prefill_attention_k_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      k_packed_weights,
+      k_bias,
+      k_scales,
+      k_cache);
+    qwen_prefill_attention_v_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      v_packed_weights,
+      v_bias,
+      v_scales,
+      v_cache);
+    qwen_prefill_attention_q_rope_stage_catapult(seq_len, tile_config, q_proj_buffer);
+    qwen_prefill_attention_k_rope_stage_catapult(seq_len, tile_config, k_cache);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_context_stage_catapult(
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const catapult_fp_t q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    const catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth],
+    const catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth],
+    catapult_fp_t context_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize]) {
+  const int query_tile = max_int(1, tile_config.query);
+
+  for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
+    const int query_end = min_int(seq_len, query_begin + query_tile);
+    prefill_attention_context_block_fp(
+        q_proj_buffer,
+        k_cache,
+        v_cache,
+        seq_len,
+        query_begin,
+        query_end,
+        tile_config,
+        context_buffer + query_begin);
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_output_projection_stage_catapult(
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const catapult_fp_t context_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    const packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const catapult_fp_t o_scales[kHiddenSize],
+    catapult_fp_t output_sequence[kPrefillSeqCapacity * kHiddenSize]) {
+  const int query_tile = max_int(1, tile_config.query);
+
+  for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
+    const int query_end = min_int(seq_len, query_begin + query_tile);
+ATTN_OUTPUT_LOOP:
+#pragma hls_pipeline_init_interval 4
+    for (int query_index = query_begin; query_index < query_end; ++query_index) {
+      const catapult_fp_t* context_token = context_buffer[query_index];
+      catapult_fp_t* output_token = output_sequence + query_index * kHiddenSize;
+      project_hidden_token_fp(
+          context_token,
+          o_packed_weights,
+          o_scales,
+          tile_config.hidden_proj,
+          tile_config.hidden_proj,
+          output_token);
+    }
+  }
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void qwen_prefill_attention_context_output_stage_catapult(
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const catapult_fp_t q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    const catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth],
+    const catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth],
+    const packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const catapult_fp_t o_scales[kHiddenSize],
+    catapult_fp_t output_sequence[kPrefillSeqCapacity * kHiddenSize]) {
+  catapult_fp_t context_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize];
+
+  qwen_prefill_attention_context_stage_catapult(
+      seq_len,
+      tile_config,
+      q_proj_buffer,
+      k_cache,
+      v_cache,
+      context_buffer);
+  qwen_prefill_attention_output_projection_stage_catapult(
+      seq_len,
+      tile_config,
+      context_buffer,
+      o_packed_weights,
+      o_scales,
+      output_sequence);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
 KernelStatus qwen_prefill_attention_kernel_catapult(
     const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
     int seq_len,
@@ -779,6 +1571,10 @@ KernelStatus qwen_prefill_attention_kernel_catapult(
     catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth],
     catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth],
     catapult_fp_t output_sequence[kPrefillSeqCapacity * kHiddenSize]) {
+  catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize];
+  catapult_fp_t q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize];
+  catapult_fp_t context_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize];
+
   if (seq_len <= 0 || tile_config.seq <= 0 || tile_config.query <= 0 || tile_config.key <= 0 || tile_config.hidden_proj <= 0 ||
       tile_config.kv_proj <= 0 || tile_config.head_dim != kHeadDim || tile_config.query_heads_parallel <= 0 ||
       tile_config.kv_heads_parallel <= 0) {
@@ -792,92 +1588,53 @@ KernelStatus qwen_prefill_attention_kernel_catapult(
     return {false, 2};
   }
 
-  const int seq_tile = max_int(1, tile_config.seq);
-  const int query_tile = max_int(1, tile_config.query);
-
-  for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
-    const int token_end = min_int(seq_len, token_begin + seq_tile);
-    for (int token_index = token_begin; token_index < token_end; ++token_index) {
-      catapult_fp_t input_norm_token[kHiddenSize];
-      const catapult_fp_t* input_token = input_sequence + token_index * kHiddenSize;
-      catapult_fp_t* q_proj_token = g_q_proj_buffer_fp[token_index];
-      catapult_fp_t* k_proj_token = k_cache + token_index * kKvWidth;
-      catapult_fp_t* v_proj_token = v_cache + token_index * kKvWidth;
-
-      rmsnorm_token_fp(input_token, input_layernorm_weight, rms_eps, input_norm_token);
-      project_tiled_token_fp(
-          input_norm_token,
-          q_packed_weights,
-          q_bias,
-          q_scales,
-          kHiddenSize,
-          kHiddenSize,
-          tile_config.hidden_proj,
-          tile_config.hidden_proj,
-          q_proj_token);
-      project_tiled_token_fp(
-          input_norm_token,
-          k_packed_weights,
-          k_bias,
-          k_scales,
-          kKvWidth,
-          kHiddenSize,
-          tile_config.kv_proj,
-          tile_config.hidden_proj,
-          k_proj_token);
-      project_tiled_token_fp(
-          input_norm_token,
-          v_packed_weights,
-          v_bias,
-          v_scales,
-          kKvWidth,
-          kHiddenSize,
-          tile_config.kv_proj,
-          tile_config.hidden_proj,
-          v_proj_token);
-
-      for (int head_base = 0; head_base < kNumAttentionHeads; head_base += tile_config.query_heads_parallel) {
-        const int head_end = min_int(kNumAttentionHeads, head_base + tile_config.query_heads_parallel);
-        for (int head = head_base; head < head_end; ++head) {
-          apply_rope_inplace_fp(q_proj_token + head * kHeadDim, token_index);
-        }
-      }
-      for (int head_base = 0; head_base < kNumKeyValueHeads; head_base += tile_config.kv_heads_parallel) {
-        const int head_end = min_int(kNumKeyValueHeads, head_base + tile_config.kv_heads_parallel);
-        for (int head = head_base; head < head_end; ++head) {
-          apply_rope_inplace_fp(k_proj_token + head * kHeadDim, token_index);
-        }
-      }
-    }
-  }
-
-  for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
-    const int query_end = min_int(seq_len, query_begin + query_tile);
-    prefill_attention_context_block_fp(
-        g_q_proj_buffer_fp,
-        k_cache,
-        v_cache,
-        seq_len,
-        query_begin,
-        query_end,
-        tile_config,
-        g_context_buffer_fp);
-
-    for (int query_index = query_begin; query_index < query_end; ++query_index) {
-      const catapult_fp_t* context_token = g_context_buffer_fp[query_index - query_begin];
-      catapult_fp_t* output_token = output_sequence + query_index * kHiddenSize;
-      project_tiled_token_fp(
-          context_token,
-          o_packed_weights,
-          nullptr,
-          o_scales,
-          kHiddenSize,
-          kHiddenSize,
-          tile_config.hidden_proj,
-          tile_config.hidden_proj,
-          output_token);
-    }
-  }
+    qwen_prefill_attention_input_norm_stage_catapult(
+      input_sequence,
+      seq_len,
+      tile_config,
+      input_layernorm_weight,
+      rms_eps,
+      normalized_sequence);
+    qwen_prefill_attention_q_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      q_packed_weights,
+      q_bias,
+      q_scales,
+      q_proj_buffer);
+    qwen_prefill_attention_k_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      k_packed_weights,
+      k_bias,
+      k_scales,
+      k_cache);
+    qwen_prefill_attention_v_projection_stage_catapult(
+      normalized_sequence,
+      seq_len,
+      tile_config,
+      v_packed_weights,
+      v_bias,
+      v_scales,
+      v_cache);
+    qwen_prefill_attention_q_rope_stage_catapult(seq_len, tile_config, q_proj_buffer);
+    qwen_prefill_attention_k_rope_stage_catapult(seq_len, tile_config, k_cache);
+    qwen_prefill_attention_context_stage_catapult(
+      seq_len,
+      tile_config,
+      q_proj_buffer,
+      k_cache,
+      v_cache,
+      context_buffer);
+    qwen_prefill_attention_output_projection_stage_catapult(
+      seq_len,
+      tile_config,
+      context_buffer,
+      o_packed_weights,
+      o_scales,
+      output_sequence);
 
   return {true, 0};
 }

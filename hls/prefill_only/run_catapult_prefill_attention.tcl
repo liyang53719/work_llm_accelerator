@@ -1,10 +1,9 @@
 set script_dir [file dirname [file normalize [info script]]]
 set project_root [file dirname $script_dir]
 set mgc_home /home/yang/tools/Siemens_EDA/Catapult_Synthesis_2022.2-1008433/Mgc_home
-set gcc_root $mgc_home/pkgs/dcs_gcc/gcc-10.3.0
-set solution_name qwen_prefill_attention_kernel_solution
-set top_function llm_accel::qwen_prefill_attention_kernel_catapult
-set clock_period 1.0
+set solution_name qwen_prefill_top_solution
+set top_function llm_accel::qwen_prefill_top_catapult
+set clock_period 2.0
 set enable_fp_operator_mapping 0
 set use_legacy_dw_lib 0
 set add_ccs_designware 0
@@ -27,10 +26,19 @@ if {[info exists ::env(QWEN_HLS_ADD_CCS_DESIGNWARE)] && $::env(QWEN_HLS_ADD_CCS_
 }
 
 set design_files [list \
+	[file join $script_dir qwen_prefill_top_catapult.cpp] \
+	[file join $script_dir qwen_prefill_top_catapult.h] \
+	[file join $script_dir qwen_prefill_top_core.cpp] \
+	[file join $script_dir qwen_prefill_top_core.h] \
 	[file join $script_dir qwen_prefill_attention_kernel.cpp] \
 	[file join $script_dir qwen_prefill_attention_kernel.h] \
+	[file join $script_dir qwen_prefill_mlp_kernel.cpp] \
+	[file join $script_dir qwen_prefill_mlp_kernel.h] \
+	[file join $script_dir qwen_prefill_top_wrapper.h] \
 	[file join $project_root common llm_accel_types.h] \
-	[file join $project_root common qwen2_model_config.h]]
+	[file join $project_root common qwen2_model_config.h] \
+	[file join $project_root common llm_layer_dispatch.h] \
+	[file join $project_root common llm_memory_layout.h]]
 
 foreach design_file $design_files {
 	if {![file exists $design_file]} {
@@ -118,6 +126,7 @@ go compile
 
 solution library add nangate-45nm_beh -- -rtlsyntool OasysRTL
 solution library add ccs_sample_mem
+solution library add amba
 if {$add_ccs_designware} {
 	puts "QWEN_NOTE skipping ccs_designware: current flow uses OasysRTL base libraries; official ccs_designware support requires a compatible DesignCompiler-backed library configuration"
 }
@@ -128,6 +137,26 @@ directive set /$top_function/core -MEM_MAP_THRESHOLD 129
 directive set SCHED_USE_MULTICYCLE true
 
 go assembly
+directive set /$top_function/weight_ddr:rsc -MAP_TO_MODULE "amba.ccs_axi4_slave_mem DATA_WIDTH=8 ADDR_WIDTH=32"
+directive set /$top_function/weight_ddr:rsc -PACKING_MODE compact
+directive set /$top_function/weight_ddr:rsc -GEN_EXTERNAL_ENABLE true
+directive set /$top_function/weight_ddr -BASE_ADDR 0
+
+directive set /$top_function/scale_ddr:rsc -MAP_TO_MODULE "amba.ccs_axi4_slave_mem DATA_WIDTH=32 ADDR_WIDTH=32"
+directive set /$top_function/scale_ddr:rsc -PACKING_MODE compact
+directive set /$top_function/scale_ddr:rsc -GEN_EXTERNAL_ENABLE true
+directive set /$top_function/scale_ddr -BASE_ADDR 0
+
+directive set /$top_function/kv_cache_ddr:rsc -MAP_TO_MODULE "amba.ccs_axi4_slave_mem DATA_WIDTH=32 ADDR_WIDTH=32"
+directive set /$top_function/kv_cache_ddr:rsc -PACKING_MODE compact
+directive set /$top_function/kv_cache_ddr:rsc -GEN_EXTERNAL_ENABLE true
+directive set /$top_function/kv_cache_ddr -BASE_ADDR 0
+
+directive set /$top_function/activation_ddr:rsc -MAP_TO_MODULE "amba.ccs_axi4_slave_mem DATA_WIDTH=32 ADDR_WIDTH=32"
+directive set /$top_function/activation_ddr:rsc -PACKING_MODE compact
+directive set /$top_function/activation_ddr:rsc -GEN_EXTERNAL_ENABLE true
+directive set /$top_function/activation_ddr -BASE_ADDR 0
+
 go architect
 emit_general_solution_metrics
 
