@@ -764,6 +764,81 @@ void scale_store_128_fp(const catapult_fp_t* accum, const catapult_fp_t& scale, 
   }
 }
 
+struct ContextKvTokenPacket {
+  catapult_fp_t k_data[kKvWidth];
+  catapult_fp_t v_data[kKvWidth];
+};
+
+struct ContextScorePacket {
+  catapult_fp_t data[llm_accel::kNumAttentionHeads];
+};
+
+void load_context_kv_token_packet(
+    const catapult_fp_t* k_proj,
+    const catapult_fp_t* v_proj,
+    int key_index,
+    ContextKvTokenPacket* packet) {
+#pragma hls_unroll yes
+  for (int dim = 0; dim < kKvWidth; ++dim) {
+    packet->k_data[dim] = k_proj[key_index * kKvWidth + dim];
+    packet->v_data[dim] = v_proj[key_index * kKvWidth + dim];
+  }
+}
+
+void compute_context_score_packet(
+    const catapult_fp_t* q_token,
+    const ContextKvTokenPacket& kv_packet,
+    int head_base,
+    int head_end,
+    catapult_fp_t attention_scaling,
+    ContextScorePacket* packet) {
+#pragma hls_unroll yes
+  for (int head_offset = 0; head_offset < llm_accel::kNumAttentionHeads; ++head_offset) {
+    if (head_base + head_offset < head_end) {
+      const int head = head_base + head_offset;
+      const int kv_head = head / kNumGroups;
+      const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
+      const catapult_fp_t* k_head = kv_packet.k_data + kv_head * llm_accel::kHeadDim;
+      const catapult_fp_t score = dot_product_128_fp(q_head, k_head);
+      packet->data[head_offset] = fp_mul_op(score, attention_scaling);
+    }
+  }
+}
+
+void update_context_max_score_packet(
+    const ContextScorePacket& packet,
+    int head_base,
+    int head_end,
+    catapult_fp_t max_score[llm_accel::kNumAttentionHeads]) {
+#pragma hls_unroll yes
+  for (int head_offset = 0; head_offset < llm_accel::kNumAttentionHeads; ++head_offset) {
+    if (head_base + head_offset < head_end && fp_gt_op(packet.data[head_offset], max_score[head_offset])) {
+      max_score[head_offset] = packet.data[head_offset];
+    }
+  }
+}
+
+void accumulate_context_value_packet(
+    const ContextScorePacket& score_packet,
+    const ContextKvTokenPacket& kv_packet,
+    int head_base,
+    int head_end,
+    const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
+    catapult_fp_t denom[llm_accel::kNumAttentionHeads],
+    catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
+#pragma hls_unroll yes
+  for (int head_offset = 0; head_offset < llm_accel::kNumAttentionHeads; ++head_offset) {
+    if (head_base + head_offset < head_end) {
+      const int head = head_base + head_offset;
+      const int kv_head = head / kNumGroups;
+      const catapult_fp_t exp_score = approx_exp_fp(fp_sub_op(score_packet.data[head_offset], max_score[head_offset]));
+      const catapult_fp_t* v_head = kv_packet.v_data + kv_head * llm_accel::kHeadDim;
+      denom[head_offset] = fp_add_op(denom[head_offset], exp_score);
+      scaled_accum_128_fp(exp_score, v_head, accum[head_offset]);
+    }
+  }
+}
+
 void attention_max_score_pass_fp(
     const catapult_fp_t* q_token,
     const catapult_fp_t* k_proj,
@@ -781,18 +856,11 @@ void attention_max_score_pass_fp(
 ATTN_CONTEXT_MAX_KEY_LOOP:
 #pragma hls_pipeline_init_interval 2
     for (int key_index = key_begin; key_index < key_end; ++key_index) {
-#pragma hls_unroll yes
-      for (int head = head_base; head < head_end; ++head) {
-        const int head_offset = head - head_base;
-        const int kv_head = head / kNumGroups;
-        const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
-        const catapult_fp_t* k_head = k_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
-        const catapult_fp_t score = dot_product_128_fp(q_head, k_head);
-        const catapult_fp_t scaled_score = fp_mul_op(score, attention_scaling);
-        if (fp_gt_op(scaled_score, max_score[head_offset])) {
-          max_score[head_offset] = scaled_score;
-        }
-      }
+      ContextKvTokenPacket kv_packet;
+      ContextScorePacket score_packet;
+      load_context_kv_token_packet(k_proj, k_proj, key_index, &kv_packet);
+      compute_context_score_packet(q_token, kv_packet, head_base, head_end, attention_scaling, &score_packet);
+      update_context_max_score_packet(score_packet, head_base, head_end, max_score);
     }
   }
 }
@@ -817,19 +885,18 @@ void attention_value_accum_pass_fp(
 ATTN_CONTEXT_VALUE_KEY_LOOP:
 #pragma hls_pipeline_init_interval 2
     for (int key_index = key_begin; key_index < key_end; ++key_index) {
-#pragma hls_unroll yes
-      for (int head = head_base; head < head_end; ++head) {
-        const int head_offset = head - head_base;
-        const int kv_head = head / kNumGroups;
-        const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
-        const catapult_fp_t* k_head = k_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
-        const catapult_fp_t* v_head = v_proj + key_index * kKvWidth + kv_head * llm_accel::kHeadDim;
-        const catapult_fp_t score = dot_product_128_fp(q_head, k_head);
-        const catapult_fp_t exp_score = approx_exp_fp(
-            fp_sub_op(fp_mul_op(score, attention_scaling), max_score[head_offset]));
-        denom[head_offset] = fp_add_op(denom[head_offset], exp_score);
-        scaled_accum_128_fp(exp_score, v_head, accum[head_offset]);
-      }
+      ContextKvTokenPacket kv_packet;
+      ContextScorePacket score_packet;
+      load_context_kv_token_packet(k_proj, v_proj, key_index, &kv_packet);
+      compute_context_score_packet(q_token, kv_packet, head_base, head_end, attention_scaling, &score_packet);
+      accumulate_context_value_packet(
+          score_packet,
+          kv_packet,
+          head_base,
+          head_end,
+          max_score,
+          denom,
+          accum);
     }
   }
 }

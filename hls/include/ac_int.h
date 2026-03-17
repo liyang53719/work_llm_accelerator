@@ -3161,7 +3161,7 @@ template<ac_special_val V, int W, int I, bool S, ac_q_mode Q, ac_o_mode O>
 inline ac_fixed<W,I,S,Q,O> value(ac_fixed<W,I,S,Q,O>);
 
 #define SPECIAL_VAL_FOR_INTS_DC(C_TYPE, WI, SI) \
-template<> inline C_TYPE value<AC_VAL_DC>(C_TYPE) { C_TYPE x; return x; }
+template<> inline C_TYPE value<AC_VAL_DC>(C_TYPE) { return (C_TYPE)0; }
 
 // -- C int types -----------------------------------------------------------------
 #define SPECIAL_VAL_FOR_INTS(C_TYPE, WI, SI) \
