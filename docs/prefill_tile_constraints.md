@@ -14,6 +14,17 @@
 | kv_width | 256 | `2 * 128 = 256` |
 | max_position_embeddings | 32768 | 模型支持的最大位置长度 |
 
+## 1.1 固定 attention 乘法器阵列约束
+
+新增硬约束：attention 路径统一使用 `32 x 64` 个乘法器做 micro-tile。
+
+- `32` 表示 token/query 方向一次并行处理 32 行。
+- `64` 表示 reduction/output 方向一次并行处理 64 列。
+- 所有 attention 相关 matmul，包括 `Q/K/V/O projection`、`Q @ K^T`、`P @ V`，都必须拆成这个 `32 x 64` 微 tile 的整数次调度。
+- 若逻辑 tile 大于 `32 x 64`，只能由多个 `32 x 64` micro-tile 拼接得到，不能再假设别的乘法器阵列形状。
+- `head_dim = 128` 因此在 attention score/context 路径上天然需要拆成 `2 x 64` 的 reduction pass。
+- 对 `seq_len = 11, 65` 这类长度，尾块允许小于 32 或 64，但主路径设计必须以 `32 x 64` 为基准。
+
 ## 2. 当前已覆盖的序列长度
 
 | 类别 | seq_len |
@@ -29,22 +40,26 @@
 
 ## 3. Prefill Attention 维度约束
 
-| 模块 | 张量 / 计算 | 形状 | 硬约束 | 推荐 tile 方向 |
+| 模块 | 张量 / 计算 | 形状 | 硬约束 | 固定 tile 方向 |
 | --- | --- | --- | --- | --- |
-| Input RMSNorm | `X -> X_ln` | `[S, 1536]` | hidden 轴若不做尾块，tile 必须整除 1536 | `T_h` 取 128, 256, 384, 512, 768 |
-| Q proj | `[S, 1536] x [1536, 1536]` | 输出 `[S, 1536]` | 输入 / 输出 hidden 轴都受 1536 约束 | `T_s x T_h x T_h` |
-| K proj | `[S, 1536] x [1536, 256]` | 输出 `[S, 256]` | 输出轴若不做尾块，tile 必须整除 256 | `T_s x T_h x T_kv` |
-| V proj | `[S, 1536] x [1536, 256]` | 输出 `[S, 256]` | 同上 | `T_s x T_h x T_kv` |
-| RoPE(Q) | `[S, 12, 128]` | `[S, 12, 128]` | head_dim 最自然粒度是 128；若切更细，必须保持偶数 pair | `T_sq x T_hq x T_hd` |
-| RoPE(K) | `[S, 2, 128]` | `[S, 2, 128]` | KV head 轴只允许 1 或 2 的整分块 | `T_sk x T_hkv x T_hd` |
-| Score | `Q @ K^T` | 每 head 为 `[S, S]` | 因果 mask 要求 `T_q`、`T_k` 支持上三角裁剪 | `T_q x T_k` |
-| Softmax/Context | `P @ V` | 每 head 为 `[S, 128]` | 若不物化全分数矩阵，可用 streaming softmax 降 SRAM | `T_q x T_k x T_hd` |
-| O proj | `[S, 1536] x [1536, 1536]` | 输出 `[S, 1536]` | 同 Q proj | `T_s x T_h x T_h` |
+| Input RMSNorm | `X -> X_ln` | `[S, 1536]` | hidden 轴若不做尾块，tile 必须整除 1536 | 非 matmul；建议输出按 `T_s=32` 向后喂给 attention |
+| Q proj | `[S, 1536] x [1536, 1536]` | 输出 `[S, 1536]` | 输入 / 输出 hidden 轴都受 1536 约束 | `T_s=32`, `T_out=64`, `T_k=64` 的 micro-tile 反复扫描 |
+| K proj | `[S, 1536] x [1536, 256]` | 输出 `[S, 256]` | 输出轴若不做尾块，tile 必须整除 256 | `T_s=32`, `T_out=64`, `T_k=64` |
+| V proj | `[S, 1536] x [1536, 256]` | 输出 `[S, 256]` | 同上 | `T_s=32`, `T_out=64`, `T_k=64` |
+| RoPE(Q) | `[S, 12, 128]` | `[S, 12, 128]` | head_dim 最自然粒度是 128；若切更细，必须保持偶数 pair | 以 `T_s=32`, `T_hd=64` 两拍完成一个 head_dim |
+| RoPE(K) | `[S, 2, 128]` | `[S, 2, 128]` | KV head 轴只允许 1 或 2 的整分块 | 以 `T_s=32`, `T_hd=64` 两拍完成一个 head_dim |
+| Score | `Q @ K^T` | 每 head 为 `[S, S]` | 因果 mask 要求 `T_q`、`T_k` 支持上三角裁剪 | 固定 `T_q=32`, `T_k=64`, `T_hd=64`，每个 head 需两次 reduction pass |
+| Softmax/Context | `P @ V` | 每 head 为 `[S, 128]` | 若不物化全分数矩阵，可用 streaming softmax 降 SRAM | `P` 以 `32 x 64` score tile 流入，`V` 以 `64 x 64` 分块，两拍累加成 `32 x 128` |
+| O proj | `[S, 1536] x [1536, 1536]` | 输出 `[S, 1536]` | 同 Q proj | `T_s=32`, `T_out=64`, `T_k=64` 的 micro-tile 反复扫描 |
 
 ### Attention 切分硬规则
 
 | 维度 | 约束 |
 | --- | --- |
+| attention MAC | 固定为 `32 x 64`，不再讨论其它 attention 乘法器规模 |
+| `T_s` / `T_q` | 主路径固定按 32 组织，尾块允许小于 32 |
+| `T_k` | score/context 的 key 方向主路径固定按 64 组织，尾块允许小于 64 |
+| matmul `T_k` | projection / score / context 的 reduction 方向主路径固定按 64 组织 |
 | `T_h` | 若希望无尾块，必须整除 1536 |
 | `T_kv` | 若希望无尾块，必须整除 256 |
 | `T_hd` | 若希望无尾块，必须整除 128；RoPE 还要求 2-way pair 对齐 |
@@ -52,21 +67,23 @@
 | `T_hkv` | 建议取 1 或 2 |
 | `T_q, T_k` | 必须支持 `11, 65` 这样的非整倍数序列尾块 |
 
-### Attention 推荐候选
+### Attention 派生候选
 
 | 轴 | 推荐候选 | 原因 |
 | --- | --- | --- |
-| `T_h` | 128, 256, 384, 512, 768 | 都整除 1536，且与 `head_dim=128` 对齐较好 |
-| `T_kv` | 128, 256 | 都整除 256，避免 KV 输出尾块 |
-| `T_hd` | 64, 128 | 64 便于更细粒度并行，128 可避免 head_dim 方向分块 |
+| `T_h` | 128, 256, 512 | 都是 64 的整数倍，且整除 1536，便于由多个 `32 x 64` micro-tile 拼接 |
+| `T_kv` | 64, 128, 256 | 都是 64 的整数倍；其中 256 刚好覆盖完整 KV 宽度 |
+| `T_hd` | 64, 128 | `64` 对应单次 micro-tile reduction，`128` 对应两次 64 的拼接 |
 | `T_hq` | 6, 12 | 直接匹配 GQA 的 `12/2 = 6` 组关系 |
-| `T_q/T_k` | 32, 64, 128, 256 | 对当前测试长度集比较自然，且便于功耗 / SRAM 折中 |
+| `T_q/T_k` | 32, 64, 128 | 都能由 `32 x 64` 微 tile 平铺得到；不再建议 256 作为首选起步点 |
 
 ### Attention 额外注意点
 
 - 不建议物化重复后的 `K/V` 为 `[S, 12, 128]` 再存储，最好保持原始 `2` 个 KV heads，按 group 广播使用。
 - 当 `seq_len` 提升到 `256/512/1024` 后，分数矩阵压力明显上升，`T_q x T_k` 将是 prefill SRAM 的主导项。
 - 若 score 保持 FP32 累加，单块 score buffer 约为 `T_q * T_k * 4` 字节。
+- 在 `32 x 64` 固定阵列下，attention projection / score / context 的单个 Psum micro-tile 规模固定为 `32 * 64 * 4 = 8 KB`；更大的逻辑 tile 只是在时间上做多次 8 KB Psum 轮转。
+- `head_dim = 128` 意味着 score/context 永远是“两次 64 维 reduction”的硬件节拍，HLS 接口和局部 buffer 设计不应再假设单拍吞掉整个 128。
 
 ## 4. Prefill MLP 维度约束
 
@@ -109,11 +126,11 @@
 | 类别 | 结论 |
 | --- | --- |
 | 长度兼容性 | 必须支持 `11/65` 这类非整倍数长度，不能只针对 2 的幂长度设计 |
-| Attention 优先约束 | `head_dim=128`、`num_heads=12`、`num_kv_heads=2`、`num_groups=6` 是最硬的结构约束 |
+| Attention 优先约束 | `head_dim=128`、`num_heads=12`、`num_kv_heads=2`、`num_groups=6`，以及固定 `32 x 64` attention 乘法器阵列，是最硬的结构约束 |
 | MLP 优先约束 | `intermediate_size=8960` 决定 `T_ff` 不能随便取 512/1024 这类常见值 |
 | SRAM 主压力 | prefill attention 的 score/context 路径会随 `seq_len` 增长最快 |
-| 推荐起步方案 | Attention 先看 `T_q/T_k=64 or 128`，`T_h=128 or 256`，`T_kv=128 or 256`；MLP 先看 `T_ff=256 or 640` |
-| 设计原则 | 先优先选择“整除主维度 + 仅在 seq_len 上留尾块”的方案，避免同时在 hidden / ffn / seq 三个轴上都留尾块 |
+| 推荐起步方案 | Attention 主路径固定 `T_q=32`, `T_k=64`, `T_k(matmul)=64`，在此基础上只调整 `T_h/T_kv/T_hd` 的整数倍拼接；MLP 仍可先看 `T_ff=256 or 640` |
+| 设计原则 | 先优先选择“固定 `32 x 64` micro-tile + 整除主维度 + 仅在 seq_len 上留尾块”的方案，避免同时在 hidden / ffn / seq 三个轴上都留尾块 |
 
 ## 6. 与当前误差包络的关系
 

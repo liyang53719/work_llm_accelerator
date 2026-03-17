@@ -111,7 +111,7 @@ options defaults
 solution new $solution_name
 solution options set /Input/SearchPath $search_path
 solution options set /Input/CompilerFlags [join $compiler_flags " "]
-solution options set /Input/CppStandard c++11
+solution options set /Input/CppStandard c++14
 solution options set /Flows/SCVerify/USE_CCS_BLOCK true
 
 project new

@@ -76,7 +76,7 @@ struct KvCacheLayout {
   std::uint64_t token_stride_bytes;
 };
 
-constexpr LayerParameterLayout default_layer_parameter_layout() {
+inline LayerParameterLayout default_layer_parameter_layout() {
   LayerParameterLayout layout{};
   std::uint64_t offset = 0;
 

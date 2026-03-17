@@ -48,6 +48,36 @@ KernelStatus qwen_prefill_attention_kernel_catapult(
     prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
     prefill_catapult_fp_t output_sequence[kPrefillCatapultSeqCapacity * kHiddenSize]);
 
+void qwen_prefill_attention_kv_cache_stage_catapult(
+    const prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const prefill_catapult_fp_t input_layernorm_weight[kHiddenSize],
+    prefill_catapult_fp_t rms_eps,
+    const packed_w4_t k_packed_weights[kPrefillCatapultKvWidth * kHiddenSize / 2],
+    const packed_w4_t v_packed_weights[kPrefillCatapultKvWidth * kHiddenSize / 2],
+    const prefill_catapult_fp_t k_bias[kPrefillCatapultKvWidth],
+    const prefill_catapult_fp_t v_bias[kPrefillCatapultKvWidth],
+    const prefill_catapult_fp_t k_scales[kPrefillCatapultKvWidth],
+    const prefill_catapult_fp_t v_scales[kPrefillCatapultKvWidth],
+    prefill_catapult_fp_t k_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
+    prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth]);
+
+void qwen_prefill_attention_q_context_output_stage_catapult(
+    const prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const prefill_catapult_fp_t input_layernorm_weight[kHiddenSize],
+    prefill_catapult_fp_t rms_eps,
+    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const prefill_catapult_fp_t q_bias[kHiddenSize],
+    const prefill_catapult_fp_t q_scales[kHiddenSize],
+    const prefill_catapult_fp_t k_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
+    const prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
+    const packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const prefill_catapult_fp_t o_scales[kHiddenSize],
+    prefill_catapult_fp_t output_sequence[kPrefillCatapultSeqCapacity * kHiddenSize]);
+
 void qwen_prefill_attention_qkv_rope_stage_catapult(
     const prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize],
     int seq_len,
