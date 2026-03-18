@@ -93,11 +93,27 @@
 
 ### 当前超限项盘点
 - 仍需后续继续收敛的超限 `ac_channel` packet 主要集中在 `q_context_output` 和 `kv_cache` 路径：
+  1. `qwen_prefill_attention_kv_cache_stage.cpp` 里的 `Kv*Packet` 仍需要按同样规则检查和收窄
+
+### 本轮继续收敛：q_context_output 也压到 256bit
+- `q_context_output` 路径里的 `HiddenProj*Packet` 原先全部超限：
   1. `HiddenProjFpTilePacket`：`64 x fp32 = 2048bit`
   2. `HiddenProjScaleTilePacket`：`64 x fp32 = 2048bit`
   3. `HiddenProjPartialTilePacket`：`64 x fp32 = 2048bit`
   4. `HiddenProjPackedWeightTilePacket`：`64 x 64 / 2 x 8bit = 16384bit`
-  5. `qwen_prefill_attention_kv_cache_stage.cpp` 里的 `Kv*Packet` 也需要按同样规则检查和收窄
+- 本轮已将它们从 channel 侧替换为分词包：
+  1. `HiddenProjFpWordPacket`：`8 x fp32 = 256bit`
+  2. `HiddenProjPackedWeightWordPacket`：`32 x packed_w4_t = 256bit`
+- 保留 tile array core 本地全宽数组不变，只把 channel 边界改成 256bit word 流；因此算法主体不变，约束只作用在搬运边界。
+
+### 本轮快速验证
+- 在 `HiddenProj` 256bit 分词改造后，使用 `QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context` 做快速前端验证。
+- 结果：未引入新的前端 `Error:`，仍可完成 `analyze` 并进入 `compile`。
+- 早期 compile 曲线为：
+  - `29.95s -> 6265324kB`
+  - `59.94s -> 12210632kB`
+  - `89.93s -> 14438856kB`
+- 结论：这次改动主要价值在于满足 `256bit` channel 约束、消除后续接口风险；对当前 `context` compile 的早期内存没有明显改善，后续仍应继续针对 `score core / softmax-context core` 的厚计算主体做分裂。
 
 ### 主线影响
 - 从现在开始，新的 channel 化步骤必须默认以 `256bit` 为上限设计 packet。

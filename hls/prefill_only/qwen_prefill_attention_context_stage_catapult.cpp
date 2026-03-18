@@ -29,6 +29,9 @@ constexpr int kPackedW4BitWidth = 8;
 constexpr int kMaxFpWordsPerBeat = kMaxDdrPortBitWidth / kCatapultFpBitWidth;
 constexpr int kMaxPackedWordsPerBeat = kMaxDdrPortBitWidth / kPackedW4BitWidth;
 constexpr int kContextTokenWordCount = llm_accel::kHiddenSize / kMaxFpWordsPerBeat;
+constexpr int kHiddenProjFpWordCount = kProjectionTileCapacity / kMaxFpWordsPerBeat;
+constexpr int kHiddenProjPackedTileSize = kProjectionTileCapacity * kProjectionTileCapacity / 2;
+constexpr int kHiddenProjPackedWordCount = kHiddenProjPackedTileSize / kMaxPackedWordsPerBeat;
 
 llm_accel::scalar_t g_q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize];
 llm_accel::scalar_t g_context_buffer[kPrefillQueryCapacity][llm_accel::kHiddenSize];
@@ -1568,6 +1571,14 @@ struct HiddenProjPartialTilePacket {
   prefill_catapult_fp_t data[kProjectionTileCapacity];
 };
 
+struct HiddenProjFpWordPacket {
+  prefill_catapult_fp_t data[kMaxFpWordsPerBeat];
+};
+
+struct HiddenProjPackedWeightWordPacket {
+  packed_w4_t data[kMaxPackedWordsPerBeat];
+};
+
 void qwen_prefill_attention_hidden_proj_tile_array_core(
     const prefill_catapult_fp_t input_tile[kProjectionTileCapacity],
     const prefill_catapult_fp_t input_layernorm_weight_tile[kProjectionTileCapacity],
@@ -1662,6 +1673,92 @@ void store_hidden_proj_partial_tile_packet(
     int out_base) {
   for (int index = 0; index < out_extent; ++index) {
     output[out_base + index] = packet.data[index];
+  }
+}
+
+void load_hidden_proj_fp_word_packet(
+    const prefill_catapult_fp_t* source,
+    int base,
+    HiddenProjFpWordPacket* packet) {
+  for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+    packet->data[index] = source[base + index];
+  }
+}
+
+void store_hidden_proj_fp_word_packet(
+    const HiddenProjFpWordPacket& packet,
+    prefill_catapult_fp_t* destination,
+    int base) {
+  for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+    destination[base + index] = packet.data[index];
+  }
+}
+
+void load_hidden_proj_packed_weight_word_packet(
+    const packed_w4_t* source,
+    int base,
+    HiddenProjPackedWeightWordPacket* packet) {
+  for (int index = 0; index < kMaxPackedWordsPerBeat; ++index) {
+    packet->data[index] = source[base + index];
+  }
+}
+
+void store_hidden_proj_packed_weight_word_packet(
+    const HiddenProjPackedWeightWordPacket& packet,
+    packed_w4_t* destination,
+    int base) {
+  for (int index = 0; index < kMaxPackedWordsPerBeat; ++index) {
+    destination[base + index] = packet.data[index];
+  }
+}
+
+void read_hidden_proj_fp_tile_packet(
+    ac_channel<HiddenProjFpWordPacket>& channel,
+    HiddenProjFpTilePacket* packet) {
+  for (int word_index = 0; word_index < kHiddenProjFpWordCount; ++word_index) {
+    const HiddenProjFpWordPacket word_packet = channel.read();
+    store_hidden_proj_fp_word_packet(word_packet, packet->data, word_index * kMaxFpWordsPerBeat);
+  }
+}
+
+void read_hidden_proj_fp_tile_words(
+    ac_channel<HiddenProjFpWordPacket>& channel,
+    prefill_catapult_fp_t* destination) {
+  for (int word_index = 0; word_index < kHiddenProjFpWordCount; ++word_index) {
+    const HiddenProjFpWordPacket word_packet = channel.read();
+    store_hidden_proj_fp_word_packet(word_packet, destination, word_index * kMaxFpWordsPerBeat);
+  }
+}
+
+void write_hidden_proj_fp_tile_packet(
+    const HiddenProjFpTilePacket& packet,
+    ac_channel<HiddenProjFpWordPacket>& channel) {
+  for (int word_index = 0; word_index < kHiddenProjFpWordCount; ++word_index) {
+    HiddenProjFpWordPacket word_packet;
+    load_hidden_proj_fp_word_packet(packet.data, word_index * kMaxFpWordsPerBeat, &word_packet);
+    channel.write(word_packet);
+  }
+}
+
+void write_hidden_proj_fp_tile_words(
+    const prefill_catapult_fp_t* source,
+    ac_channel<HiddenProjFpWordPacket>& channel) {
+  for (int word_index = 0; word_index < kHiddenProjFpWordCount; ++word_index) {
+    HiddenProjFpWordPacket word_packet;
+    load_hidden_proj_fp_word_packet(source, word_index * kMaxFpWordsPerBeat, &word_packet);
+    channel.write(word_packet);
+  }
+}
+
+void read_hidden_proj_packed_weight_tile_packet(
+    ac_channel<HiddenProjPackedWeightWordPacket>& channel,
+    HiddenProjPackedWeightTilePacket* packet) {
+  for (int word_index = 0; word_index < kHiddenProjPackedWordCount; ++word_index) {
+    const HiddenProjPackedWeightWordPacket word_packet = channel.read();
+    store_hidden_proj_packed_weight_word_packet(
+        word_packet,
+        packet->data,
+        word_index * kMaxPackedWordsPerBeat);
   }
 }
 
@@ -1792,21 +1889,27 @@ void qwen_prefill_attention_hidden_proj_tile_array_core(
 #pragma hls_resource out_extent:rsc variables="out_extent" map_to_module="[DirectInput]"
 #pragma hls_resource apply_rmsnorm:rsc variables="apply_rmsnorm" map_to_module="[DirectInput]"
 void qwen_prefill_attention_q_context_output_tile_stream_catapult(
-    ac_channel<HiddenProjFpTilePacket>& input_tile_chan,
-    ac_channel<HiddenProjFpTilePacket>& input_layernorm_weight_tile_chan,
-    ac_channel<HiddenProjPackedWeightTilePacket>& packed_weight_tile_chan,
-    ac_channel<HiddenProjScaleTilePacket>& scale_tile_chan,
-    ac_channel<HiddenProjPartialTilePacket>& partial_sum_tile_in_chan,
+    ac_channel<HiddenProjFpWordPacket>& input_tile_chan,
+    ac_channel<HiddenProjFpWordPacket>& input_layernorm_weight_tile_chan,
+    ac_channel<HiddenProjPackedWeightWordPacket>& packed_weight_tile_chan,
+    ac_channel<HiddenProjFpWordPacket>& scale_tile_chan,
+    ac_channel<HiddenProjFpWordPacket>& partial_sum_tile_in_chan,
     prefill_catapult_fp_t inv_rms,
     int lane_extent,
     int out_extent,
     bool apply_rmsnorm,
-    ac_channel<HiddenProjPartialTilePacket>& partial_sum_tile_out_chan) {
-  HiddenProjFpTilePacket input_tile_packet = input_tile_chan.read();
-  HiddenProjFpTilePacket input_layernorm_weight_tile_packet = input_layernorm_weight_tile_chan.read();
-  HiddenProjPackedWeightTilePacket packed_weight_tile_packet = packed_weight_tile_chan.read();
-  HiddenProjScaleTilePacket scale_tile_packet = scale_tile_chan.read();
-  HiddenProjPartialTilePacket partial_sum_tile_packet = partial_sum_tile_in_chan.read();
+    ac_channel<HiddenProjFpWordPacket>& partial_sum_tile_out_chan) {
+  HiddenProjFpTilePacket input_tile_packet;
+  HiddenProjFpTilePacket input_layernorm_weight_tile_packet;
+  HiddenProjPackedWeightTilePacket packed_weight_tile_packet;
+  HiddenProjScaleTilePacket scale_tile_packet;
+  HiddenProjPartialTilePacket partial_sum_tile_packet;
+
+  read_hidden_proj_fp_tile_packet(input_tile_chan, &input_tile_packet);
+  read_hidden_proj_fp_tile_packet(input_layernorm_weight_tile_chan, &input_layernorm_weight_tile_packet);
+  read_hidden_proj_packed_weight_tile_packet(packed_weight_tile_chan, &packed_weight_tile_packet);
+  read_hidden_proj_fp_tile_words(scale_tile_chan, scale_tile_packet.data);
+  read_hidden_proj_fp_tile_words(partial_sum_tile_in_chan, partial_sum_tile_packet.data);
 
   qwen_prefill_attention_hidden_proj_tile_array_core(
       input_tile_packet.data,
@@ -1819,7 +1922,7 @@ void qwen_prefill_attention_q_context_output_tile_stream_catapult(
       out_extent,
       apply_rmsnorm);
 
-  partial_sum_tile_out_chan.write(partial_sum_tile_packet);
+  write_hidden_proj_fp_tile_words(partial_sum_tile_packet.data, partial_sum_tile_out_chan);
 }
 
 KernelStatus qwen_prefill_attention_kernel(
