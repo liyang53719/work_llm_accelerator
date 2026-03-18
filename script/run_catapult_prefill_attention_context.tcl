@@ -10,7 +10,7 @@ if {[info exists ::env(MGC_HOME)] && $::env(MGC_HOME) ne ""} {
 }
 
 set solution_name qwen_prefill_attention_context_solution
-set top_function llm_accel::qwen_prefill_attention_context_stage_catapult
+set top_function qwen_prefill_attention_context_query_tile_stream_catapult
 set clock_period 2.0
 
 if {[info exists ::env(QWEN_HLS_CLOCK_PERIOD)] && $::env(QWEN_HLS_CLOCK_PERIOD) ne ""} {

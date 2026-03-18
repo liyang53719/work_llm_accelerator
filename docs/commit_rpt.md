@@ -218,6 +218,123 @@
 
 ### 本轮动作
 - `process_context_max_score_key(...)` 之前虽然只需要 `K`，但仍复用了 `ContextKvTokenPacket` 路径，并把 `k_proj` 伪装成 `v_proj` 传入，等于在 `max score` pass 里仍构造了一份冗余的 `V` 侧数据通路。
+
+## 2026-03-18 继续落实 stream top：context 顶层切到 channel top
+
+### 本轮动作
+- 在 `docs/project_plan.md` 中补充 `RTL 接口硬约束`：所有用于生成 RTL 的 `top/ccore` 默认应使用 `ac_channel` 数据口和 `<=256bit` 标量/寄存器配置口；任何超 `256bit` 的非 `ac_channel` 端口都应视为必须解释的问题。
+- 将 `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp` 中的数组型 `context_stage_catapult` 真正降格为 loader/store wrapper：
+  1. wrapper 负责从 `q_proj_buffer` 装载 query tile 并写入 `query_meta_chan/query_word_chan`
+  2. `qwen_prefill_attention_context_query_tile_stream_catapult(...)` 作为新的 stream top 接收 channel + `k_cache/v_cache`
+  3. wrapper 再通过 `store_context_result_packets(...)` 回写 `context_buffer`
+- 同时修复了一次错误 patch 遗留的源码损坏：`qwen_prefill_attention_q_context_output_stage_catapult(...)` 原先被 stream-wrapper 代码打断，已恢复为“Q 投影/RoPE -> stream top -> output projection”的完整流程。
+- 更新 `script/run_catapult_prefill_attention_context.tcl`，将 `top_function` 切到 `qwen_prefill_attention_context_query_tile_stream_catapult`。
+
+### 本轮快速验证
+- 使用 `timeout 150s env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context` 做守卫验证。
+- 结果：
+  1. `analyze` 成功完成，日志记录为 `6.91s / 1532964kB peak`。
+  2. `compile` 成功启动，没有新的前端 `Error:`。
+  3. 新 top 已被识别为 `qwen_prefill_attention_context_query_tile_stream_catapult`。
+- 早期 compile 曲线为：
+  - `29.97s -> 6330860kB`
+  - `59.96s -> 12014024kB`
+  - `89.95s -> 14373320kB`
+  - `119.94s -> 14181072kB`
+
+### 当前结论
+- 这次修改完成了用户要求的结构目标：
+  1. Tcl top 已切到真正的 channel stream top
+  2. `q_proj_buffer/context_buffer` 已外移到数组 wrapper
+  3. stream top 的接口已收敛为 `ac_channel + 标量配置 + cache 指针`
+- 但从 compile 曲线看，收益并不明显：
+  1. 早期内存与上一轮“仅内部 stage stream 化”相比几乎持平
+  2. `compile` 仍在约 `14.37GB` 附近回到同一平台
+  3. 日志中可见 Catapult 继续对 `qwen_prefill_attention_context_query_tile_stream_catapult`、`prefill_attention_context_score_stream_stage_fp`、`prefill_attention_context_value_stream_stage_fp` 做 `Inlining routine ...`，说明仅把 top_function 切到 stream top 还不足以阻止 compile 图重新膨胀
+- 因此当前更像是“接口形状整改完成，但 compile 图边界仍未被 Catapult 真正保留”。下一步应优先研究如何阻止这些 stage 在 compile 中被重新 inline，而不是再回到数组 top 上做外围包装。
+
+## 2026-03-18 方案 A 继续推进：score/value stage 深拆但未改变 compile 平台期
+
+### 本轮动作
+- 延续用户指定的方案 A，不再停留在外层 tile wrapper：
+  1. 先把 `prefill_attention_context_score_*_stage_fp(...)` / `prefill_attention_context_value_stage_fp(...)` 改成真正直接执行 per-query 读入、计算、写出的 stage，而不是只包一层 `compute_context_*_tasks(...)`。
+  2. 去掉 `value stage` 内部 `context_meta/context_word` 中间 channel，把结果直接写回 `context` tile。
+  3. 进一步尝试把 `prefill_attention_context_query_max_score_fp(...)` / `prefill_attention_context_query_value_fp(...)` 提升为显式 `ccore`。
+  4. 再进一步把 `head-group` 级别的 `prefill_attention_context_max_score_head_group_stage_fp(...)` / `prefill_attention_context_value_head_group_stage_fp(...)` 提升为更窄的 `ccore`，并把 `query_max_score/query_value` 退回 orchestration helper。
+
+### 验证结果
+- 三轮验证都保持同一结论：
+  1. `analyze` 稳定通过，耗时约 `6.4s ~ 6.7s`。
+  2. `compile` 稳定启动。
+  3. 没有新的前端 `Error:`。
+  4. 但 `150s` 守卫窗口内，`compile` 始终停留在 `score_query_tile_stage` / `max_score_head_group_stage` 相关综合展开，未进入新的稳定里程碑。
+- 监控曲线基本不变，仍然在早期快速爬升到约 `14GB` 平台：
+  - stage 直接执行版：
+    - `~30s -> 6920684kB`
+    - `~75s -> 13390280kB`
+    - `~110s -> 14373320kB`
+  - `query_max_score/query_value` 设为 `ccore`：
+    - `~30s -> 6920684kB`
+    - `~75s -> 13390280kB`
+    - `~110s -> 14373320kB`
+  - `head-group stage ccore`：
+    - `~30s -> 7015356kB`
+    - `~75s -> 13586888kB`
+    - `~110s -> 14373320kB`
+
+### 当前判断
+- 这说明当前瓶颈已经不是“有没有把 score/value 命名成独立 stage”，而是：
+  1. `context` 主路径依然是数组接口驱动的大调用图。
+  2. `score` 计算主体内部仍然保留 `head-group -> key-tile -> key` 的厚展开。
+  3. 在现有数组调用图里继续移动 `ccore` 边界，Catapult 仍会把这些阶段重新 inline 展开，内存平台期基本不变。
+- 因此下一步不应继续做同类 `ccore` 位置微调，而应转入真正的 `loader/compute/store` 三段 channel 化：
+  1. `cache reader / key-tile meta loader`
+  2. `score compute core`
+  3. `softmax/value context core`
+- 在这一步完成前，本轮修改不具备形成稳定 checkpoint 的条件，因此先不提交。
+
+## 2026-03-18 继续收敛：去掉内部 stage 的大数组 ccore 端口
+
+### 本轮动作
+- 针对“函数端口超过 `256bit` 且不是 `ac_channel`”这个约束，继续清理 `context` 主路径里最可疑的几层边界。
+- 原先最重的内部 `ccore` 仍然带着大数组端口：
+  1. `prefill_attention_context_score_query_tile_stage_fp(...)` 直接接 `q_proj_tile[kPrefillQueryCapacity][kHiddenSize]`
+  2. `prefill_attention_context_value_stage_fp(...)` 直接接 `context[kPrefillQueryCapacity][kHiddenSize]`
+  3. `prefill_attention_context_*_head_group_stage_fp(...)` 仍直接接整 `ContextQueryPacket` / `ContextTokenPacket`
+- 本轮改成：
+  1. 去掉这些内部 array-port stage 的 `ccore` 身份
+  2. 新增真正的 channel/stream stage：
+     - `prefill_attention_context_score_stream_stage_fp(...)`
+     - `prefill_attention_context_value_stream_stage_fp(...)`
+  3. 数组只留在 loader/store wrapper：
+     - `stream_context_query_tasks_from_sequence(...)`
+     - `stream_context_query_tasks_from_tile(...)`
+     - `store_context_result_packets(...)`
+  4. `score/value` 两个被 Catapult 识别的 stage 边界，现在只保留：标量、指针和 `ac_channel`，不再暴露整块 query/context 数组端口。
+
+### 本轮验证
+- 重新执行：`timeout 150s env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context`
+- 结果：
+  1. `analyze` 在 `7.16s` 完成。
+  2. `compile` 正常启动。
+  3. 未出现新的前端 `Error:`。
+  4. Catapult 日志里，旧的 `score_query_tile_stage_fp` 已不再是 `ccore`；新的 `score_stream_stage_fp` / `value_stream_stage_fp` 被识别为 design routine。
+- 监控采样点为：
+  1. `~52s -> 6593004kB`
+  2. `~83s -> 12603848kB`
+  3. `~110s -> 14373320kB`
+
+### 当前结论
+- 这一步说明“大数组 ccore 端口”确实是 compile 膨胀来源之一：
+  1. 相比前一轮 `head-group stage ccore` 的约 `13.59GB`，本轮 `~83s` 已降到约 `12.60GB`
+  2. 早期 compile 图明显变瘦，说明把内部 stage 边界改成 channel/stream 是正确方向
+- 但 `~110s` 仍回到约 `14.37GB`，说明还有一个更大的数组边界没有拆掉：
+  1. 当前文件里剩余的 `ccore` 只有 `score_stream_stage_fp`、`value_stream_stage_fp` 和 `qwen_prefill_attention_context_stage_catapult`
+  2. 其中真正还带大数组口的，只剩 `qwen_prefill_attention_context_stage_catapult(...)` 顶层
+- 因此下一步主线已经更明确：
+  1. 不是再改内部 `score/value` stage
+  2. 而是把 `qwen_prefill_attention_context_stage_catapult` 这个顶层数组口 `ccore` 继续下沉成真正的 stream top，或者把 `cache reader / store` 再外移一层
+  3. 若不处理这个顶层大数组口，Catapult 仍会把内部 stream stage 重新 inline 回顶层大图，后半段内存平台仍难消失
 - 本轮改成：
   1. 新增 `ContextKTokenPacket`
   2. 新增 `load_context_k_token_packet(...)`

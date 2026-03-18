@@ -19,6 +19,17 @@
 - 输出位置：全部文件保存在 `work_llm_accelerator/`
 - attention backend：验证与参考路径统一只允许 `sdpa`
 
+## 2.1 RTL 接口硬约束
+
+- 所有用于 Catapult 生成 RTL 的 `top` / `ccore` 函数接口，默认必须优先落实为：
+  1. `ac_channel<...>` 数据口
+  2. `<=256bit` 的标量/寄存器配置口
+- 只要某个用于生成 RTL 的函数端口超过 `256bit`，且该端口不是 `ac_channel`，执行时必须先回答两个问题：
+  1. 为什么它还没有被改成 `ac_channel` 或窄标量接口
+  2. 它是否正在导致 Catapult compile 图膨胀或内存爆炸
+- 大数组口如 `q_proj_buffer`、`context_buffer`、整 tile array、整 token array，默认不应直接挂在 `top` / `ccore` 边界上；应尽量外移到 loader / store wrapper。
+- 后续执行 context、kv_cache、q_context_output 等 Catapult 主线时，默认先检查当前 `top_function` 和所有 `ccore` 是否仍残留 array-port 边界；若有，优先处理这些边界，再做局部算子瘦身。
+
 ## 3. 独立性要求
 
 - 可以参考 `work/` 的总体思路、预算口径、验证分层、日志组织方式。
