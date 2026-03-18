@@ -286,3 +286,50 @@
 - 这一步的直接价值是把 `key_tile` 循环正式提升为显式 stage 边界，并确认 Catapult 前端可以接受该结构。
 - 从 `analyze -> compile` 入场表现看，它没有比上一轮更差，也没有立即拉低 `90s+` 区间的内存平台。
 - 因此当前主矛盾进一步收敛到：仅仅把 `key_tile` 变成元数据驱动 stage 还不够，后续仍需要继续拆 `softmax / value accumulate` 内部的厚状态更新，或者进一步减少单个 stage 中携带的 head-state 体积。
+
+## 2026-03-18 继续压缩 value pass：softmax weight 与 value accumulate 分段
+
+### 本轮动作
+- 在 `value` pass 内继续把“算 score/exp + 读 V + 更新 denom/accum”这段厚逻辑拆成两个显式子阶段：
+  1. `stream_context_value_key_tasks(...)` 负责为每个 `key` 生成 `exp(score-max)` 权重流，并同步发出 `V` word 流。
+  2. `accumulate_context_value_key_tasks(...)` 负责消费这两路 `256bit` word stream，更新 `denom` 与 `accum`。
+- 新增/调整的关键组件：
+  1. `kContextKvWordCount`
+  2. `ContextVTokenPacket`
+  3. `accumulate_context_weighted_value_packet(...)`
+  4. `stream_context_v_token_packet_words(...)`
+  5. `read_context_v_token_packet_words(...)`
+  6. `stream_context_value_key_packet_words(...)`
+  7. `accumulate_context_value_key_packet_words(...)`
+- `process_context_value_tile(...)` 现在不再直接在单循环内做全部工作，而是通过两路 `ac_channel<ContextFpWordPacket>` 显式连接这两个子阶段。
+
+### 首次验证与修复
+- 第一次快速验证仍然没有进入 `compile`，但失败原因依旧是 Catapult EDG 的声明顺序，而不是新拆分逻辑本身。
+- 新增的 value-stage helper 被放在 `ContextFpWordPacket` 与相关 word helper 之前，导致 `analyze` 报出新的 `CRD-20`：
+  1. `ContextFpWordPacket` 未定义
+  2. `load_context_fp_word_packet(...)` 未定义
+  3. `store_context_fp_word_packet(...)` 未定义
+  4. `stream_context_score_packet_words(...)` / `read_context_score_packet_words(...)` 未定义
+- 修复方式：
+  1. 把 `ContextFpWordPacket` 定义前移到 packet 定义区。
+  2. 为上述 word helper 增加前置声明，确保 EDG 在新 value-stage 函数体处可见。
+
+### 修复后快速验证
+- 重新执行 `timeout 150s env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context`。
+- 结果：
+  1. `analyze` 在 `6.81s` 完成。
+  2. 后续正常进入 `Starting transformation 'compile'`。
+  3. 本次退出原因仍然是外层 `timeout 150s`，不是新的前端 `Error:`。
+- 监控采样点为：
+  1. 约 `15s -> 1532964kB`
+  2. 约 `51s -> 6134252kB`
+  3. 约 `77s -> 12276168kB`
+  4. 约 `106s -> 14504392kB`
+  5. `150s` 前进程树 RSS 约在 `13.3GB ~ 13.8GB` 区间
+
+### 当前结论
+- 这次拆分已经把 `value` pass 里最厚的一段显式拆成“weight 生成”和“value 累加”两层，且 Catapult 前端已经接受该结构。
+- 与上一轮 `key_tile` 分阶段相比，早期内存略有下降：
+  1. `~52s` 从约 `6.46GB` 降到约 `6.13GB`
+  2. `~78s` 从约 `12.54GB` 降到约 `12.28GB`
+- 但 `~106s` 仍回到约 `14.50GB`，说明 compile 图的主要厚度还留在更深层的状态更新或后续阶段，当前拆分只能改善早期膨胀，尚未改变 `90s+` 平台。

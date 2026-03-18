@@ -31,6 +31,7 @@ constexpr int kMaxPackedWordsPerBeat = kMaxDdrPortBitWidth / kPackedW4BitWidth;
 constexpr int kContextTokenWordCount = llm_accel::kHiddenSize / kMaxFpWordsPerBeat;
 constexpr int kContextScoreWordCount =
   (llm_accel::kNumAttentionHeads + kMaxFpWordsPerBeat - 1) / kMaxFpWordsPerBeat;
+constexpr int kContextKvWordCount = kKvWidth / kMaxFpWordsPerBeat;
 constexpr int kHiddenProjFpWordCount = kProjectionTileCapacity / kMaxFpWordsPerBeat;
 constexpr int kHiddenProjPackedTileSize = kProjectionTileCapacity * kProjectionTileCapacity / 2;
 constexpr int kHiddenProjPackedWordCount = kHiddenProjPackedTileSize / kMaxPackedWordsPerBeat;
@@ -772,8 +773,16 @@ struct ContextKTokenPacket {
   catapult_fp_t k_data[kKvWidth];
 };
 
+struct ContextVTokenPacket {
+  catapult_fp_t v_data[kKvWidth];
+};
+
 struct ContextScorePacket {
   catapult_fp_t data[llm_accel::kNumAttentionHeads];
+};
+
+struct ContextFpWordPacket {
+  catapult_fp_t data[kMaxFpWordsPerBeat];
 };
 
 struct ContextHeadStatePacket {
@@ -786,6 +795,24 @@ struct ContextKeyTileMetaPacket {
   int key_begin;
   int key_end;
 };
+
+void load_context_fp_word_packet(
+  const catapult_fp_t* source,
+  int base,
+  ContextFpWordPacket* packet);
+
+void store_context_fp_word_packet(
+  const ContextFpWordPacket& packet,
+  catapult_fp_t* destination,
+  int base);
+
+void stream_context_score_packet_words(
+  const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
+  ac_channel<ContextFpWordPacket>& max_score_word_chan);
+
+void read_context_score_packet_words(
+  ac_channel<ContextFpWordPacket>& max_score_word_chan,
+  catapult_fp_t max_score[llm_accel::kNumAttentionHeads]);
 
 void load_context_kv_token_packet(
     const catapult_fp_t* k_proj,
@@ -806,6 +833,16 @@ void load_context_k_token_packet(
 #pragma hls_unroll yes
   for (int dim = 0; dim < kKvWidth; ++dim) {
     packet->k_data[dim] = k_proj[key_index * kKvWidth + dim];
+  }
+}
+
+void load_context_v_token_packet(
+    const catapult_fp_t* v_proj,
+    int key_index,
+    ContextVTokenPacket* packet) {
+#pragma hls_unroll yes
+  for (int dim = 0; dim < kKvWidth; ++dim) {
+    packet->v_data[dim] = v_proj[key_index * kKvWidth + dim];
   }
 }
 
@@ -862,12 +899,11 @@ void update_context_max_score_packet(
   }
 }
 
-void accumulate_context_value_packet(
-    const ContextScorePacket& score_packet,
-    const ContextKvTokenPacket& kv_packet,
+void accumulate_context_weighted_value_packet(
+    const catapult_fp_t exp_score[llm_accel::kNumAttentionHeads],
+    const ContextVTokenPacket& v_packet,
     int head_base,
     int head_end,
-    const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
     catapult_fp_t denom[llm_accel::kNumAttentionHeads],
     catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
 #pragma hls_unroll yes
@@ -875,10 +911,9 @@ void accumulate_context_value_packet(
     if (head_base + head_offset < head_end) {
       const int head = head_base + head_offset;
       const int kv_head = head / kNumGroups;
-      const catapult_fp_t exp_score = approx_exp_fp(fp_sub_op(score_packet.data[head_offset], max_score[head_offset]));
-      const catapult_fp_t* v_head = kv_packet.v_data + kv_head * llm_accel::kHeadDim;
-      denom[head_offset] = fp_add_op(denom[head_offset], exp_score);
-      scaled_accum_128_fp(exp_score, v_head, accum[head_offset]);
+      const catapult_fp_t* v_head = v_packet.v_data + kv_head * llm_accel::kHeadDim;
+      denom[head_offset] = fp_add_op(denom[head_offset], exp_score[head_offset]);
+      scaled_accum_128_fp(exp_score[head_offset], v_head, accum[head_offset]);
     }
   }
 }
@@ -912,7 +947,26 @@ void process_context_max_score_key(
   update_context_max_score_packet(score_packet, head_base, head_end, max_score);
 }
 
-void process_context_value_key(
+void stream_context_v_token_packet_words(
+    const ContextVTokenPacket& v_packet,
+    ac_channel<ContextFpWordPacket>& value_word_chan) {
+  for (int word_index = 0; word_index < kContextKvWordCount; ++word_index) {
+    ContextFpWordPacket word_packet;
+    load_context_fp_word_packet(v_packet.v_data, word_index * kMaxFpWordsPerBeat, &word_packet);
+    value_word_chan.write(word_packet);
+  }
+}
+
+void read_context_v_token_packet_words(
+    ac_channel<ContextFpWordPacket>& value_word_chan,
+    ContextVTokenPacket* v_packet) {
+  for (int word_index = 0; word_index < kContextKvWordCount; ++word_index) {
+    const ContextFpWordPacket word_packet = value_word_chan.read();
+    store_context_fp_word_packet(word_packet, v_packet->v_data, word_index * kMaxFpWordsPerBeat);
+  }
+}
+
+void stream_context_value_key_packet_words(
     const catapult_fp_t* q_token,
     const catapult_fp_t* k_proj,
     const catapult_fp_t* v_proj,
@@ -921,10 +975,12 @@ void process_context_value_key(
     int head_end,
     catapult_fp_t attention_scaling,
     const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
-    catapult_fp_t denom[llm_accel::kNumAttentionHeads],
-    catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
+    ac_channel<ContextFpWordPacket>& exp_score_word_chan,
+    ac_channel<ContextFpWordPacket>& value_word_chan) {
   ContextKvTokenPacket kv_packet;
   ContextScorePacket score_packet;
+  catapult_fp_t exp_score[llm_accel::kNumAttentionHeads];
+
   process_context_score_key(
       q_token,
       k_proj,
@@ -935,14 +991,97 @@ void process_context_value_key(
       attention_scaling,
       &kv_packet,
       &score_packet);
-  accumulate_context_value_packet(
-      score_packet,
-      kv_packet,
+
+#pragma hls_unroll yes
+  for (int head_offset = 0; head_offset < llm_accel::kNumAttentionHeads; ++head_offset) {
+    if (head_base + head_offset < head_end) {
+      exp_score[head_offset] = approx_exp_fp(fp_sub_op(score_packet.data[head_offset], max_score[head_offset]));
+    } else {
+      exp_score[head_offset] = fp_zero();
+    }
+  }
+
+  ContextVTokenPacket v_packet;
+#pragma hls_unroll yes
+  for (int dim = 0; dim < kKvWidth; ++dim) {
+    v_packet.v_data[dim] = kv_packet.v_data[dim];
+  }
+
+  stream_context_score_packet_words(exp_score, exp_score_word_chan);
+  stream_context_v_token_packet_words(v_packet, value_word_chan);
+}
+
+void accumulate_context_value_key_packet_words(
+    int head_base,
+    int head_end,
+    ac_channel<ContextFpWordPacket>& exp_score_word_chan,
+    ac_channel<ContextFpWordPacket>& value_word_chan,
+    catapult_fp_t denom[llm_accel::kNumAttentionHeads],
+    catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
+  catapult_fp_t exp_score[llm_accel::kNumAttentionHeads];
+  ContextVTokenPacket v_packet;
+
+  read_context_score_packet_words(exp_score_word_chan, exp_score);
+  read_context_v_token_packet_words(value_word_chan, &v_packet);
+  accumulate_context_weighted_value_packet(
+      exp_score,
+      v_packet,
       head_base,
       head_end,
-      max_score,
       denom,
       accum);
+}
+
+void stream_context_value_key_tasks(
+    const catapult_fp_t* q_token,
+    const catapult_fp_t* k_proj,
+    const catapult_fp_t* v_proj,
+    int key_begin,
+    int key_end,
+    int head_base,
+    int head_end,
+    catapult_fp_t attention_scaling,
+    const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
+    ac_channel<ContextFpWordPacket>& exp_score_word_chan,
+    ac_channel<ContextFpWordPacket>& value_word_chan) {
+ATTN_CONTEXT_VALUE_WEIGHT_KEY_LOOP:
+#pragma hls_pipeline_init_interval 2
+  for (int key_index = key_begin; key_index < key_end; ++key_index) {
+    stream_context_value_key_packet_words(
+        q_token,
+        k_proj,
+        v_proj,
+        key_index,
+        head_base,
+        head_end,
+        attention_scaling,
+        max_score,
+        exp_score_word_chan,
+        value_word_chan);
+  }
+}
+
+void accumulate_context_value_key_tasks(
+    int key_begin,
+    int key_end,
+    int head_base,
+    int head_end,
+    ac_channel<ContextFpWordPacket>& exp_score_word_chan,
+    ac_channel<ContextFpWordPacket>& value_word_chan,
+    catapult_fp_t denom[llm_accel::kNumAttentionHeads],
+    catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
+ATTN_CONTEXT_VALUE_ACCUM_KEY_LOOP:
+#pragma hls_pipeline_init_interval 2
+  for (int key_index = key_begin; key_index < key_end; ++key_index) {
+    (void)key_index;
+    accumulate_context_value_key_packet_words(
+        head_base,
+        head_end,
+        exp_score_word_chan,
+        value_word_chan,
+        denom,
+        accum);
+  }
 }
 
 void process_context_max_score_tile(
@@ -980,21 +1119,30 @@ void process_context_value_tile(
     const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
     catapult_fp_t denom[llm_accel::kNumAttentionHeads],
     catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
-ATTN_CONTEXT_VALUE_KEY_LOOP:
-#pragma hls_pipeline_init_interval 2
-  for (int key_index = key_begin; key_index < key_end; ++key_index) {
-    process_context_value_key(
-        q_token,
-        k_proj,
-        v_proj,
-        key_index,
-        head_base,
-        head_end,
-        attention_scaling,
-        max_score,
-        denom,
-        accum);
-  }
+  ac_channel<ContextFpWordPacket> exp_score_word_chan;
+  ac_channel<ContextFpWordPacket> value_word_chan;
+
+  stream_context_value_key_tasks(
+      q_token,
+      k_proj,
+      v_proj,
+      key_begin,
+      key_end,
+      head_base,
+      head_end,
+      attention_scaling,
+      max_score,
+      exp_score_word_chan,
+      value_word_chan);
+  accumulate_context_value_key_tasks(
+      key_begin,
+      key_end,
+      head_base,
+      head_end,
+      exp_score_word_chan,
+      value_word_chan,
+      denom,
+      accum);
 }
 
 void compute_context_max_score_tile_tasks(
@@ -1066,10 +1214,6 @@ struct ContextQueryMetaPacket {
 
 struct ContextResultMetaPacket {
   int query_offset;
-};
-
-struct ContextFpWordPacket {
-  catapult_fp_t data[kMaxFpWordsPerBeat];
 };
 
 void load_context_query_packet_from_sequence(
