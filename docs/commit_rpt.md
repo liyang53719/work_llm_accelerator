@@ -374,3 +374,41 @@
   2. `~77s` 从约 `12.28GB` 降到约 `12.15GB`
   3. `~106s` 从约 `14.50GB` 回到约 `14.44GB`
 - 当前判断：移除冗余 `max_score` 携带对 compile 图后半段有轻微收敛，但幅度仍然有限；下一步更可能需要继续压缩 `value` 路径内部状态更新的耦合，或者进一步拆分 `head-group` 级 orchestrator，而不是继续在单个 packet 字段上做细粒度修补。
+
+## 2026-03-18 方案 A：context stage 改成 query-tile wrapper/core 形态
+
+### 本轮动作
+- 按 Catapult 推荐的“wrapper 与固定尺寸 compute core 分离”思路，继续收窄 `context` top 的职责。
+- 新增两个 query-tile wrapper helper：
+  1. `load_context_query_tile_from_sequence(...)`
+  2. `store_context_query_tile_to_sequence(...)`
+- `qwen_prefill_attention_context_stage_catapult(...)` 不再让核心直接从 full-sequence `q_proj_buffer` 读取 query，而是改成：
+  1. 外层按 `query_tile` 装载 `q_proj_tile`
+  2. 调用固定尺寸 core：`prefill_attention_context_query_tile_fp(...)`
+  3. 再把 `context_tile` 写回 `context_buffer`
+- 同样把 `qwen_prefill_attention_context_output_stage_catapult(...)` 也切到相同的 tile-core 组织方式，避免同一文件内保留两种不同的 `context` 入口形态。
+
+### 本轮意图
+- 这一步不是再改 `score/value` 算法本体，而是把 compute core 从“直接感知 full sequence 数组”进一步推进到“只处理固定 query tile”的形态。
+- 目标是缩小 top/orchestrator 在 compile 看到的数组视角和循环耦合，向 `loader -> core -> store` 的标准 HLS 数据流建模继续靠拢。
+
+### 快速验证
+- 执行：`timeout 150s env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context`
+- 结果：
+  1. `analyze` 在 `7.55s` 完成。
+  2. 后续正常进入 `Starting transformation 'compile'`。
+  3. 未出现新的前端 `Error:`；本次仍由外层 `timeout 150s` 截断。
+- 监控采样点为：
+  1. 约 `15s -> 1532964kB`
+  2. 约 `52s -> 6068716kB`
+  3. 约 `83s -> 11882952kB`
+  4. 约 `109s -> 14504392kB`
+  5. `150s` 前进程树 RSS 约在 `13.4GB ~ 13.8GB`
+
+### 当前结论
+- 方案 A 的结构方向本身是成立的：Catapult 前端接受“query-tile wrapper + fixed-tile core”这种更接近硬件分层的组织方式。
+- 但在当前 `150s` 快速窗口内，没有观察到立刻的 compile-memory 收敛；相较上一轮 head-state 瘦身：
+  1. `~52s` 从约 `6.27GB` 回到约 `6.07GB`
+  2. `~77s` 从约 `12.15GB` 回到约 `11.88GB`
+  3. `~106s` 又上升到约 `14.50GB`
+- 当前判断：仅把 query 输入视角从 full-sequence 数组收窄到 tile-core 还不够，compile 图的主要厚度仍在 `score/value` 内部以及 `head-group` 级 orchestration；后续若继续沿方案 A 推进，应进一步把 `score core` / `value core` 提升成更明确的 stage top，而不只是外层 tile wrapper。

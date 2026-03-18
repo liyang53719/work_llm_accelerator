@@ -1245,6 +1245,42 @@ void store_context_token_packet(
   }
 }
 
+void load_context_query_tile_from_sequence(
+    const catapult_fp_t q_proj[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+    int query_begin,
+    int query_end,
+    catapult_fp_t q_proj_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize]) {
+LOAD_CONTEXT_QUERY_TILE_LOOP:
+#pragma hls_pipeline_init_interval 1
+  for (int query_index = query_begin; query_index < query_end; ++query_index) {
+    const catapult_fp_t* q_proj_token = q_proj[query_index];
+    catapult_fp_t* q_proj_tile_token = q_proj_tile[query_index - query_begin];
+
+#pragma hls_unroll yes
+    for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
+      q_proj_tile_token[dim] = q_proj_token[dim];
+    }
+  }
+}
+
+void store_context_query_tile_to_sequence(
+    const catapult_fp_t context_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize],
+    int query_begin,
+    int query_end,
+    catapult_fp_t context_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize]) {
+STORE_CONTEXT_QUERY_TILE_LOOP:
+#pragma hls_pipeline_init_interval 1
+  for (int query_index = query_begin; query_index < query_end; ++query_index) {
+    const catapult_fp_t* context_tile_token = context_tile[query_index - query_begin];
+    catapult_fp_t* context_buffer_token = context_buffer[query_index];
+
+#pragma hls_unroll yes
+    for (int dim = 0; dim < llm_accel::kHiddenSize; ++dim) {
+      context_buffer_token[dim] = context_tile_token[dim];
+    }
+  }
+}
+
 void init_context_query_meta_packet(
     int query_index,
     int query_offset,
@@ -2823,15 +2859,20 @@ void qwen_prefill_attention_context_stage_catapult(
 
   for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
     const int query_end = min_int(seq_len, query_begin + query_tile);
-    prefill_attention_context_block_fp(
-        q_proj_buffer,
+    catapult_fp_t q_proj_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize];
+    catapult_fp_t context_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize];
+
+    load_context_query_tile_from_sequence(q_proj_buffer, query_begin, query_end, q_proj_tile);
+    prefill_attention_context_query_tile_fp(
+        q_proj_tile,
         k_cache,
         v_cache,
         seq_len,
         query_begin,
         query_end,
         tile_config,
-        context_buffer + query_begin);
+        context_tile);
+    store_context_query_tile_to_sequence(context_tile, query_begin, query_end, context_buffer);
   }
 }
 
@@ -2879,21 +2920,24 @@ void qwen_prefill_attention_context_output_stage_catapult(
 
   for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
     const int query_end = min_int(seq_len, query_begin + query_tile);
+    catapult_fp_t q_proj_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize];
+    catapult_fp_t context_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize];
 
-    prefill_attention_context_block_fp(
-        q_proj_buffer,
+    load_context_query_tile_from_sequence(q_proj_buffer, query_begin, query_end, q_proj_tile);
+    prefill_attention_context_query_tile_fp(
+        q_proj_tile,
         k_cache,
         v_cache,
         seq_len,
         query_begin,
         query_end,
         tile_config,
-        context_buffer);
+        context_tile);
 
 ATTN_CONTEXT_OUTPUT_LOOP:
 #pragma hls_pipeline_init_interval 4
     for (int query_index = query_begin; query_index < query_end; ++query_index) {
-      const catapult_fp_t* context_token = context_buffer[query_index - query_begin];
+      const catapult_fp_t* context_token = context_tile[query_index - query_begin];
       catapult_fp_t* output_token = output_sequence + query_index * kHiddenSize;
       project_hidden_token_tilewise_fp(
           context_token,
