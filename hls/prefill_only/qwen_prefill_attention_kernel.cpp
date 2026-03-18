@@ -839,6 +839,56 @@ void accumulate_context_value_packet(
   }
 }
 
+void process_context_max_score_tile(
+    const catapult_fp_t* q_token,
+    const catapult_fp_t* k_proj,
+    int key_begin,
+    int key_end,
+    int head_base,
+    int head_end,
+    catapult_fp_t attention_scaling,
+    catapult_fp_t max_score[llm_accel::kNumAttentionHeads]) {
+ATTN_CONTEXT_MAX_KEY_LOOP:
+#pragma hls_pipeline_init_interval 2
+  for (int key_index = key_begin; key_index < key_end; ++key_index) {
+    ContextKvTokenPacket kv_packet;
+    ContextScorePacket score_packet;
+    load_context_kv_token_packet(k_proj, k_proj, key_index, &kv_packet);
+    compute_context_score_packet(q_token, kv_packet, head_base, head_end, attention_scaling, &score_packet);
+    update_context_max_score_packet(score_packet, head_base, head_end, max_score);
+  }
+}
+
+void process_context_value_tile(
+    const catapult_fp_t* q_token,
+    const catapult_fp_t* k_proj,
+    const catapult_fp_t* v_proj,
+    int key_begin,
+    int key_end,
+    int head_base,
+    int head_end,
+    catapult_fp_t attention_scaling,
+    const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
+    catapult_fp_t denom[llm_accel::kNumAttentionHeads],
+    catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
+ATTN_CONTEXT_VALUE_KEY_LOOP:
+#pragma hls_pipeline_init_interval 2
+  for (int key_index = key_begin; key_index < key_end; ++key_index) {
+    ContextKvTokenPacket kv_packet;
+    ContextScorePacket score_packet;
+    load_context_kv_token_packet(k_proj, v_proj, key_index, &kv_packet);
+    compute_context_score_packet(q_token, kv_packet, head_base, head_end, attention_scaling, &score_packet);
+    accumulate_context_value_packet(
+        score_packet,
+        kv_packet,
+        head_base,
+        head_end,
+        max_score,
+        denom,
+        accum);
+  }
+}
+
 void attention_max_score_pass_fp(
     const catapult_fp_t* q_token,
     const catapult_fp_t* k_proj,
@@ -853,15 +903,15 @@ void attention_max_score_pass_fp(
   for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
     const int query_limit = query_index + 1;
     const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
-ATTN_CONTEXT_MAX_KEY_LOOP:
-#pragma hls_pipeline_init_interval 2
-    for (int key_index = key_begin; key_index < key_end; ++key_index) {
-      ContextKvTokenPacket kv_packet;
-      ContextScorePacket score_packet;
-      load_context_kv_token_packet(k_proj, k_proj, key_index, &kv_packet);
-      compute_context_score_packet(q_token, kv_packet, head_base, head_end, attention_scaling, &score_packet);
-      update_context_max_score_packet(score_packet, head_base, head_end, max_score);
-    }
+    process_context_max_score_tile(
+        q_token,
+        k_proj,
+        key_begin,
+        key_end,
+        head_base,
+        head_end,
+        attention_scaling,
+        max_score);
   }
 }
 
@@ -882,22 +932,18 @@ void attention_value_accum_pass_fp(
   for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
     const int query_limit = query_index + 1;
     const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
-ATTN_CONTEXT_VALUE_KEY_LOOP:
-#pragma hls_pipeline_init_interval 2
-    for (int key_index = key_begin; key_index < key_end; ++key_index) {
-      ContextKvTokenPacket kv_packet;
-      ContextScorePacket score_packet;
-      load_context_kv_token_packet(k_proj, v_proj, key_index, &kv_packet);
-      compute_context_score_packet(q_token, kv_packet, head_base, head_end, attention_scaling, &score_packet);
-      accumulate_context_value_packet(
-          score_packet,
-          kv_packet,
-          head_base,
-          head_end,
-          max_score,
-          denom,
-          accum);
-    }
+    process_context_value_tile(
+        q_token,
+        k_proj,
+        v_proj,
+        key_begin,
+        key_end,
+        head_base,
+        head_end,
+        attention_scaling,
+        max_score,
+        denom,
+        accum);
   }
 }
 
