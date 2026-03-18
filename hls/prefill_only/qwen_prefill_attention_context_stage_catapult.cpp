@@ -23,6 +23,12 @@ constexpr float kTwoPi = 6.28318530717958647692f;
 constexpr float kHalfPi = 1.57079632679489661923f;
 constexpr float kAttentionScaling = 0.08838834764831845f;
 constexpr float kRopeFreqStep = 0.8058421877614801f;
+constexpr int kMaxDdrPortBitWidth = 256;
+constexpr int kCatapultFpBitWidth = 32;
+constexpr int kPackedW4BitWidth = 8;
+constexpr int kMaxFpWordsPerBeat = kMaxDdrPortBitWidth / kCatapultFpBitWidth;
+constexpr int kMaxPackedWordsPerBeat = kMaxDdrPortBitWidth / kPackedW4BitWidth;
+constexpr int kContextTokenWordCount = llm_accel::kHiddenSize / kMaxFpWordsPerBeat;
 
 llm_accel::scalar_t g_q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize];
 llm_accel::scalar_t g_context_buffer[kPrefillQueryCapacity][llm_accel::kHiddenSize];
@@ -1021,15 +1027,17 @@ struct ContextTokenPacket {
   catapult_fp_t data[llm_accel::kHiddenSize];
 };
 
-struct ContextQueryTaskPacket {
+struct ContextQueryMetaPacket {
   int query_index;
   int query_offset;
-  ContextQueryPacket query;
 };
 
-struct ContextResultPacket {
+struct ContextResultMetaPacket {
   int query_offset;
-  ContextTokenPacket context;
+};
+
+struct ContextFpWordPacket {
+  catapult_fp_t data[kMaxFpWordsPerBeat];
 };
 
 void load_context_query_packet_from_sequence(
@@ -1062,22 +1070,76 @@ void store_context_token_packet(
   }
 }
 
-void init_context_query_task_packet(
-    const ContextQueryPacket& query_packet,
+void init_context_query_meta_packet(
     int query_index,
     int query_offset,
-    ContextQueryTaskPacket* packet) {
+    ContextQueryMetaPacket* packet) {
   packet->query_index = query_index;
   packet->query_offset = query_offset;
-  packet->query = query_packet;
 }
 
-void init_context_result_packet(
-    const ContextTokenPacket& context_packet,
+void init_context_result_meta_packet(
     int query_offset,
-    ContextResultPacket* packet) {
+    ContextResultMetaPacket* packet) {
   packet->query_offset = query_offset;
-  packet->context = context_packet;
+}
+
+void load_context_fp_word_packet(
+    const catapult_fp_t* source,
+    int base,
+    ContextFpWordPacket* packet) {
+#pragma hls_unroll yes
+  for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+    packet->data[index] = source[base + index];
+  }
+}
+
+void store_context_fp_word_packet(
+    const ContextFpWordPacket& packet,
+    catapult_fp_t* destination,
+    int base) {
+#pragma hls_unroll yes
+  for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+    destination[base + index] = packet.data[index];
+  }
+}
+
+void stream_context_query_packet_words(
+    const ContextQueryPacket& query_packet,
+    ac_channel<ContextFpWordPacket>& query_word_chan) {
+  for (int word_index = 0; word_index < kContextTokenWordCount; ++word_index) {
+    ContextFpWordPacket word_packet;
+    load_context_fp_word_packet(query_packet.data, word_index * kMaxFpWordsPerBeat, &word_packet);
+    query_word_chan.write(word_packet);
+  }
+}
+
+void read_context_query_packet_words(
+    ac_channel<ContextFpWordPacket>& query_word_chan,
+    ContextQueryPacket* query_packet) {
+  for (int word_index = 0; word_index < kContextTokenWordCount; ++word_index) {
+    const ContextFpWordPacket word_packet = query_word_chan.read();
+    store_context_fp_word_packet(word_packet, query_packet->data, word_index * kMaxFpWordsPerBeat);
+  }
+}
+
+void stream_context_result_packet_words(
+    const ContextTokenPacket& context_packet,
+    ac_channel<ContextFpWordPacket>& context_word_chan) {
+  for (int word_index = 0; word_index < kContextTokenWordCount; ++word_index) {
+    ContextFpWordPacket word_packet;
+    load_context_fp_word_packet(context_packet.data, word_index * kMaxFpWordsPerBeat, &word_packet);
+    context_word_chan.write(word_packet);
+  }
+}
+
+void read_context_result_packet_words(
+    ac_channel<ContextFpWordPacket>& context_word_chan,
+    ContextTokenPacket* context_packet) {
+  for (int word_index = 0; word_index < kContextTokenWordCount; ++word_index) {
+    const ContextFpWordPacket word_packet = context_word_chan.read();
+    store_context_fp_word_packet(word_packet, context_packet->data, word_index * kMaxFpWordsPerBeat);
+  }
 }
 
 void init_context_head_state_packet(
@@ -1199,15 +1261,17 @@ void stream_context_query_tasks_from_sequence(
     const catapult_fp_t q_proj[kPrefillSeqCapacity][llm_accel::kHiddenSize],
     int query_begin,
     int query_end,
-    ac_channel<ContextQueryTaskPacket>& query_task_chan) {
+    ac_channel<ContextQueryMetaPacket>& query_meta_chan,
+    ac_channel<ContextFpWordPacket>& query_word_chan) {
   for (int query_index = query_begin; query_index < query_end; ++query_index) {
     ContextQueryPacket q_packet;
-    ContextQueryTaskPacket task_packet;
+    ContextQueryMetaPacket meta_packet;
     const int query_offset = query_index - query_begin;
 
     load_context_query_packet_from_sequence(q_proj, query_index, &q_packet);
-    init_context_query_task_packet(q_packet, query_index, query_offset, &task_packet);
-    query_task_chan.write(task_packet);
+    init_context_query_meta_packet(query_index, query_offset, &meta_packet);
+    query_meta_chan.write(meta_packet);
+    stream_context_query_packet_words(q_packet, query_word_chan);
   }
 }
 
@@ -1215,15 +1279,17 @@ void stream_context_query_tasks_from_tile(
     const catapult_fp_t q_proj_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize],
     int query_begin,
     int query_end,
-    ac_channel<ContextQueryTaskPacket>& query_task_chan) {
+    ac_channel<ContextQueryMetaPacket>& query_meta_chan,
+    ac_channel<ContextFpWordPacket>& query_word_chan) {
   for (int query_index = query_begin; query_index < query_end; ++query_index) {
     ContextQueryPacket q_packet;
-    ContextQueryTaskPacket task_packet;
+    ContextQueryMetaPacket meta_packet;
     const int query_offset = query_index - query_begin;
 
     load_context_query_packet_from_tile(q_proj_tile, query_offset, &q_packet);
-    init_context_query_task_packet(q_packet, query_index, query_offset, &task_packet);
-    query_task_chan.write(task_packet);
+    init_context_query_meta_packet(query_index, query_offset, &meta_packet);
+    query_meta_chan.write(meta_packet);
+    stream_context_query_packet_words(q_packet, query_word_chan);
   }
 }
 
@@ -1233,33 +1299,41 @@ void compute_context_query_tasks(
     int seq_len,
     int query_count,
     const llm_accel::PrefillAttentionTileConfig& tile_config,
-    ac_channel<ContextQueryTaskPacket>& query_task_chan,
-    ac_channel<ContextResultPacket>& context_result_chan) {
+    ac_channel<ContextQueryMetaPacket>& query_meta_chan,
+    ac_channel<ContextFpWordPacket>& query_word_chan,
+    ac_channel<ContextResultMetaPacket>& context_meta_chan,
+    ac_channel<ContextFpWordPacket>& context_word_chan) {
   for (int query_slot = 0; query_slot < query_count; ++query_slot) {
-    ContextQueryTaskPacket task_packet = query_task_chan.read();
-    ContextResultPacket result_packet;
+    const ContextQueryMetaPacket meta_packet = query_meta_chan.read();
+    ContextQueryPacket query_packet;
+    ContextResultMetaPacket result_meta_packet;
     ContextTokenPacket context_packet;
 
+    read_context_query_packet_words(query_word_chan, &query_packet);
     prefill_attention_context_query_fp(
-        task_packet.query,
+        query_packet,
         k_proj,
         v_proj,
         seq_len,
-        task_packet.query_index,
+        meta_packet.query_index,
         tile_config,
         &context_packet);
-    init_context_result_packet(context_packet, task_packet.query_offset, &result_packet);
-    context_result_chan.write(result_packet);
+    init_context_result_meta_packet(meta_packet.query_offset, &result_meta_packet);
+    context_meta_chan.write(result_meta_packet);
+    stream_context_result_packet_words(context_packet, context_word_chan);
   }
 }
 
 void store_context_result_packets(
     int query_count,
-    ac_channel<ContextResultPacket>& context_result_chan,
+    ac_channel<ContextResultMetaPacket>& context_meta_chan,
+    ac_channel<ContextFpWordPacket>& context_word_chan,
     catapult_fp_t context[kPrefillQueryCapacity][llm_accel::kHiddenSize]) {
   for (int query_slot = 0; query_slot < query_count; ++query_slot) {
-    ContextResultPacket result_packet = context_result_chan.read();
-    store_context_token_packet(result_packet.context, context, result_packet.query_offset);
+    const ContextResultMetaPacket meta_packet = context_meta_chan.read();
+    ContextTokenPacket context_packet;
+    read_context_result_packet_words(context_word_chan, &context_packet);
+    store_context_token_packet(context_packet, context, meta_packet.query_offset);
   }
 }
 
@@ -1272,13 +1346,24 @@ void prefill_attention_context_block_stream_fp(
     int query_end,
     const llm_accel::PrefillAttentionTileConfig& tile_config,
     catapult_fp_t context[kPrefillQueryCapacity][llm_accel::kHiddenSize]) {
-  ac_channel<ContextQueryTaskPacket> query_task_chan;
-  ac_channel<ContextResultPacket> context_result_chan;
+  ac_channel<ContextQueryMetaPacket> query_meta_chan;
+  ac_channel<ContextFpWordPacket> query_word_chan;
+  ac_channel<ContextResultMetaPacket> context_meta_chan;
+  ac_channel<ContextFpWordPacket> context_word_chan;
   const int query_count = query_end - query_begin;
 
-  stream_context_query_tasks_from_sequence(q_proj, query_begin, query_end, query_task_chan);
-  compute_context_query_tasks(k_proj, v_proj, seq_len, query_count, tile_config, query_task_chan, context_result_chan);
-  store_context_result_packets(query_count, context_result_chan, context);
+  stream_context_query_tasks_from_sequence(q_proj, query_begin, query_end, query_meta_chan, query_word_chan);
+  compute_context_query_tasks(
+      k_proj,
+      v_proj,
+      seq_len,
+      query_count,
+      tile_config,
+      query_meta_chan,
+      query_word_chan,
+      context_meta_chan,
+      context_word_chan);
+  store_context_result_packets(query_count, context_meta_chan, context_word_chan, context);
 }
 
 void prefill_attention_context_query_tile_stream_fp(
@@ -1290,13 +1375,24 @@ void prefill_attention_context_query_tile_stream_fp(
     int query_end,
     const llm_accel::PrefillAttentionTileConfig& tile_config,
     catapult_fp_t context[kPrefillQueryCapacity][llm_accel::kHiddenSize]) {
-  ac_channel<ContextQueryTaskPacket> query_task_chan;
-  ac_channel<ContextResultPacket> context_result_chan;
+  ac_channel<ContextQueryMetaPacket> query_meta_chan;
+  ac_channel<ContextFpWordPacket> query_word_chan;
+  ac_channel<ContextResultMetaPacket> context_meta_chan;
+  ac_channel<ContextFpWordPacket> context_word_chan;
   const int query_count = query_end - query_begin;
 
-  stream_context_query_tasks_from_tile(q_proj_tile, query_begin, query_end, query_task_chan);
-  compute_context_query_tasks(k_proj, v_proj, seq_len, query_count, tile_config, query_task_chan, context_result_chan);
-  store_context_result_packets(query_count, context_result_chan, context);
+  stream_context_query_tasks_from_tile(q_proj_tile, query_begin, query_end, query_meta_chan, query_word_chan);
+  compute_context_query_tasks(
+      k_proj,
+      v_proj,
+      seq_len,
+      query_count,
+      tile_config,
+      query_meta_chan,
+      query_word_chan,
+      context_meta_chan,
+      context_word_chan);
+  store_context_result_packets(query_count, context_meta_chan, context_word_chan, context);
 }
 
 template <bool HasBias, int OutDim, int InDim>

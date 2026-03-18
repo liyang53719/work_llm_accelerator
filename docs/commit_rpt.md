@@ -76,6 +76,42 @@
   - `89.95s -> 14438856kB`
 - 结论：这次 query 级三段化至少没有破坏已有 compile 入口；是否能改变后半段内存失控，还需要后续长跑观察。
 
+## 2026-03-18 新约束：DDR 读取口最大 256bit
+
+### 约束解释
+- 所有由 DDR/大数组搬运进入内部 channel 的数据，单拍最大位宽限制为 `256bit`。
+- 对 `fp32` 数据，这意味着单 packet 最多 `8` 个元素。
+- 对 `packed_w4_t`，这意味着单 packet 最多 `32` 个字节。
+
+### 已完成检查
+- 当前 `context` query 级 channel 已按该约束收紧：
+  - 原先 `ContextQueryTaskPacket` 和 `ContextResultPacket` 都携带整 token，远超 `256bit`。
+  - 现已改成：
+    1. `ContextQueryMetaPacket` / `ContextResultMetaPacket` 负责索引元数据。
+    2. `ContextFpWordPacket` 负责每拍 `8 x fp32 = 256bit` 的分词搬运。
+- 这意味着 query loader / compute / store 三段之间，不再通过整 token 大包传输，而是按 `1536 / 8 = 192` 个 word 顺序搬运。
+
+### 当前超限项盘点
+- 仍需后续继续收敛的超限 `ac_channel` packet 主要集中在 `q_context_output` 和 `kv_cache` 路径：
+  1. `HiddenProjFpTilePacket`：`64 x fp32 = 2048bit`
+  2. `HiddenProjScaleTilePacket`：`64 x fp32 = 2048bit`
+  3. `HiddenProjPartialTilePacket`：`64 x fp32 = 2048bit`
+  4. `HiddenProjPackedWeightTilePacket`：`64 x 64 / 2 x 8bit = 16384bit`
+  5. `qwen_prefill_attention_kv_cache_stage.cpp` 里的 `Kv*Packet` 也需要按同样规则检查和收窄
+
+### 主线影响
+- 从现在开始，新的 channel 化步骤必须默认以 `256bit` 为上限设计 packet。
+- 后续继续推进时，优先把 `score/context` 主线内部保持在 `256bit` 分词搬运，再逐步回收 `q_context_output` 与 `kv_cache` 现有的大 tile packet。
+
+### 约束下的快速验证
+- 使用 `QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context` 对 256bit query channel 改造做快速验证。
+- 结果：未引入新的前端 `Error:`，仍可完成 `analyze` 并进入 `compile`。
+- 早期 compile 曲线相较上一轮略有下降：
+  - `29.99s -> 5454380kB`，低于上一轮的 `6068716kB`
+  - `59.97s -> 10965448kB`，低于上一轮的 `12079560kB`
+  - `89.96s -> 14438856kB`，与上一轮接近
+- 当前结论：`query` 级 256bit 分词至少没有恶化 compile 入口，并对早期内存有轻微改善；后半段是否继续失控，仍需长跑验证。
+
 ### 后续验证
 - 重新运行 context flow，观察：
   1. `Found design routine` 的数量是否明显下降。
