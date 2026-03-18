@@ -1,5 +1,13 @@
 # work_llm_accelerator 未提交改动盘点（2026-03-16）
 
+## 2026-03-18 当前增量
+- 当前实际未提交代码改动已收敛到 `hls/prefill_only/qwen_prefill_attention_kernel.cpp` 一处，主要是 `score/context` 路径的 helper 分层继续收窄。
+- 本轮新增方向：
+	- `per-key` score/max/value helper 下沉，减少 tile loop 内直接混合的 load/compute/update 逻辑。
+	- `head group` 级包装块收口，令 query 级入口只保留 head-group 调度。
+- 当前验证状态：`catapult_prefill_attention_context` 正在长时间 `compile`，已观察到持续推进且暂未出现新的 `Error:` / `Failed`。
+- 额外未跟踪文件仍有 `docs/arc_talk.md`，不应混入这轮最小提交。
+
 ## 仓库状态
 - 仓库路径：`/home/yang/Documents/github/tvm/work_llm_accelerator`
 - 分支：`main`

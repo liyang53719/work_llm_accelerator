@@ -18,7 +18,7 @@ if {[info exists ::env(QWEN_HLS_CLOCK_PERIOD)] && $::env(QWEN_HLS_CLOCK_PERIOD) 
 }
 
 set design_files [list \
-	[file join $hls_root prefill_only qwen_prefill_attention_kernel.cpp] \
+	[file join $hls_root prefill_only qwen_prefill_attention_context_stage_catapult.cpp] \
 	[file join $hls_root prefill_only qwen_prefill_attention_kernel.h] \
 	[file join $hls_root common llm_accel_types.h] \
 	[file join $hls_root common qwen2_model_config.h]]

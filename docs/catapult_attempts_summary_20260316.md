@@ -1,5 +1,15 @@
 # Catapult 尝试成败总结（截至 2026-03-16）
 
+## 2026-03-18 进展补记
+1. context 路径继续按层收窄 helper 边界（进行中）
+- 动作：已把 `score/context` 从 packet helper 继续下沉到 `per-key` helper，本轮再把 `head group` 的 init/compute/store 收成单独包装块，保持 query 级入口只负责调度。
+- 结果：当前代码边界更接近后续 `cache reader / score core / softmax-context core` 的三段式拆分，外部接口未扩大。
+
+2. `catapult_prefill_attention_context` 长时间 compile 观察（进行中）
+- 现象：`QWEN_HLS_ENABLE_EXTRACT=0 make catapult_prefill_attention_context` 运行时间明显拉长，短窗口不适合判断成败。
+- 当前观测：日志已稳定进入 `compile`，至少推进到 150 秒以上，期间未命中新的 `Error:` / `Failed` 关键字；日志尾部仍处于 `compile` 内联展开阶段，尚未看到终态。
+- 结论：当前更像是 compile 长跑，而不是立即回退到新的前端解析错误。
+
 ## 成功尝试
 1. 输入 token 访问方式修复（成功）
 - 现象：早期 compile 触发内部断言，关联 input sequence 的 reinterpret cast 访问。

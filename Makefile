@@ -6,6 +6,7 @@ TCL_PREFILL_ATTENTION_Q_CONTEXT_OUTPUT := script/run_catapult_prefill_attention_
 LOG_DIR := work/tmp
 LOG_FILE := $(LOG_DIR)/catapult_prefill_latest.log
 LOG_FILE_PREFILL_ATTENTION_CONTEXT := $(LOG_DIR)/catapult_prefill_attention_context_latest.log
+MONITOR_FILE_PREFILL_ATTENTION_CONTEXT := $(LOG_DIR)/catapult_prefill_attention_context_monitor.log
 LOG_FILE_PREFILL_ATTENTION_KV_CACHE := $(LOG_DIR)/catapult_prefill_attention_kv_cache_latest.log
 LOG_FILE_PREFILL_ATTENTION_Q_CONTEXT_OUTPUT := $(LOG_DIR)/catapult_prefill_attention_q_context_output_latest.log
 
@@ -16,7 +17,11 @@ catapult_prefill:
 
 catapult_prefill_attention_context:
 	mkdir -p $(LOG_DIR)
-	$(CATAPULT) -shell -file $(TCL_PREFILL_ATTENTION_CONTEXT) | tee $(LOG_FILE_PREFILL_ATTENTION_CONTEXT)
+	bash script/run_catapult_with_memory_guard.sh \
+		$(CATAPULT) \
+		$(TCL_PREFILL_ATTENTION_CONTEXT) \
+		$(LOG_FILE_PREFILL_ATTENTION_CONTEXT) \
+		$(MONITOR_FILE_PREFILL_ATTENTION_CONTEXT)
 
 catapult_prefill_attention_kv_cache:
 	mkdir -p $(LOG_DIR)

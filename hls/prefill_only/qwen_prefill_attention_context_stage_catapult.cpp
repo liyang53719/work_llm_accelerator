@@ -7,9 +7,6 @@
 #include "../include/ccs_dw_fp_lib.h"
 #endif
 
-#define QWEN_HLS_CCORE _Pragma("hls_design ccore")
-#define QWEN_HLS_SEQ _Pragma("hls_ccore_type sequential")
-
 namespace {
 
 constexpr int kKvWidth = llm_accel::kNumKeyValueHeads * llm_accel::kHeadDim;
@@ -558,10 +555,6 @@ void approx_sincos_fp(const catapult_fp_t& angle, catapult_fp_t* sin_value, cata
 
 catapult_fp_t reduce_sum_128_fp(catapult_fp_t values[kParallelMacLaneCount]);
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 catapult_fp_t rmsnorm_square_sum_fp(
     const catapult_fp_t input[llm_accel::kHiddenSize]) {
   catapult_fp_t square_sum = fp_zero();
@@ -573,10 +566,6 @@ catapult_fp_t rmsnorm_square_sum_fp(
   return square_sum;
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void rmsnorm_scale_weight_fp(
     const catapult_fp_t weight[llm_accel::kHiddenSize],
     const catapult_fp_t& inv_rms,
@@ -586,10 +575,6 @@ void rmsnorm_scale_weight_fp(
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void rmsnorm_apply_scale_fp(
     const catapult_fp_t input[llm_accel::kHiddenSize],
     const catapult_fp_t scaled_weight[llm_accel::kHiddenSize],
@@ -684,10 +669,6 @@ catapult_fp_t reduce_sum_128_fp(catapult_fp_t values[kParallelMacLaneCount]) {
   return fp_add_op(stage2[0], stage2[1]);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void rmsnorm_square_chunk_fp(
     const catapult_fp_t input[llm_accel::kHiddenSize],
     int base_index,
@@ -699,10 +680,6 @@ void rmsnorm_square_chunk_fp(
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void rmsnorm_scale_weight_chunk_fp(
     const catapult_fp_t weight[llm_accel::kHiddenSize],
     const catapult_fp_t& inv_rms,
@@ -714,10 +691,6 @@ void rmsnorm_scale_weight_chunk_fp(
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void rmsnorm_apply_scale_chunk_fp(
     const catapult_fp_t input[llm_accel::kHiddenSize],
     const catapult_fp_t scaled_weight[llm_accel::kHiddenSize],
@@ -1251,10 +1224,6 @@ ATTN_PROJ_STORE_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void project_hidden_token_bias_fp(
     const catapult_fp_t input_token[llm_accel::kHiddenSize],
     const llm_accel::packed_w4_t packed_weights[llm_accel::kHiddenSize * llm_accel::kHiddenSize / 2],
@@ -1273,10 +1242,6 @@ void project_hidden_token_bias_fp(
       output);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void project_kv_token_bias_fp(
     const catapult_fp_t input_token[llm_accel::kHiddenSize],
     const llm_accel::packed_w4_t packed_weights[kKvWidth * llm_accel::kHiddenSize / 2],
@@ -1295,10 +1260,6 @@ void project_kv_token_bias_fp(
       output);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void project_hidden_token_fp(
     const catapult_fp_t input_token[llm_accel::kHiddenSize],
     const llm_accel::packed_w4_t packed_weights[llm_accel::kHiddenSize * llm_accel::kHiddenSize / 2],
@@ -1316,10 +1277,6 @@ void project_hidden_token_fp(
       output);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void prefill_attention_context_block_fp(
     const catapult_fp_t q_proj[kPrefillSeqCapacity][llm_accel::kHiddenSize],
     const catapult_fp_t* k_proj,
@@ -1600,9 +1557,6 @@ void qwen_prefill_attention_hidden_proj_tile_array_core(
 #endif
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design top
-#endif
 #pragma hls_pipeline_init_interval 1
 #pragma hls_resource inv_rms:rsc variables="inv_rms" map_to_module="[DirectInput]"
 #pragma hls_resource lane_extent:rsc variables="lane_extent" map_to_module="[DirectInput]"
@@ -1639,10 +1593,6 @@ void qwen_prefill_attention_q_context_output_tile_stream_catapult(
   partial_sum_tile_out_chan.write(partial_sum_tile_packet);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 KernelStatus qwen_prefill_attention_kernel(
     const scalar_t* input_sequence,
     int seq_len,
@@ -1773,10 +1723,6 @@ KernelStatus qwen_prefill_attention_kernel(
 
 #ifdef __SYNTHESIS__
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_input_norm_stage_catapult(
     const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
     int seq_len,
@@ -1797,10 +1743,6 @@ ATTN_TOKEN_NORM_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_q_projection_stage_catapult(
     const catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize],
     int seq_len,
@@ -1830,10 +1772,6 @@ ATTN_Q_PROJ_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_k_projection_stage_catapult(
     const catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize],
     int seq_len,
@@ -1863,10 +1801,6 @@ ATTN_K_PROJ_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_v_projection_stage_catapult(
     const catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize],
     int seq_len,
@@ -1896,10 +1830,6 @@ ATTN_V_PROJ_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_kv_projection_stage_catapult(
     const catapult_fp_t normalized_sequence[kPrefillSeqCapacity][llm_accel::kHiddenSize],
     int seq_len,
@@ -1930,10 +1860,6 @@ void qwen_prefill_attention_kv_projection_stage_catapult(
       v_cache);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_qkv_projection_stage_catapult(
     const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
     int seq_len,
@@ -1987,10 +1913,6 @@ void qwen_prefill_attention_qkv_projection_stage_catapult(
       v_cache);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_kv_cache_stage_catapult(
     const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
     int seq_len,
@@ -2045,10 +1967,6 @@ ATNN_KV_STREAM_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_q_rope_stage_catapult(
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
@@ -2073,10 +1991,6 @@ ATTN_Q_ROPE_TOKEN_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_k_rope_stage_catapult(
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
@@ -2101,10 +2015,6 @@ ATTN_K_ROPE_TOKEN_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_rope_apply_stage_catapult(
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
@@ -2114,10 +2024,6 @@ void qwen_prefill_attention_rope_apply_stage_catapult(
   qwen_prefill_attention_k_rope_stage_catapult(seq_len, tile_config, k_cache);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_qkv_rope_stage_catapult(
     const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
     int seq_len,
@@ -2173,8 +2079,8 @@ void qwen_prefill_attention_qkv_rope_stage_catapult(
     qwen_prefill_attention_k_rope_stage_catapult(seq_len, tile_config, k_cache);
 }
 
-QWEN_HLS_CCORE
-QWEN_HLS_SEQ
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
 void qwen_prefill_attention_context_stage_catapult(
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
@@ -2198,10 +2104,6 @@ void qwen_prefill_attention_context_stage_catapult(
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_output_projection_stage_catapult(
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
@@ -2232,10 +2134,6 @@ ATTN_OUTPUT_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_context_output_stage_catapult(
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
@@ -2280,10 +2178,6 @@ ATTN_CONTEXT_OUTPUT_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void qwen_prefill_attention_q_context_output_stage_catapult(
     const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
     int seq_len,
@@ -2362,10 +2256,6 @@ ATNN_Q_CONTEXT_OUTPUT_LOOP:
   }
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 KernelStatus qwen_prefill_attention_kernel_catapult(
     const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
     int seq_len,
