@@ -333,3 +333,44 @@
   1. `~52s` 从约 `6.46GB` 降到约 `6.13GB`
   2. `~78s` 从约 `12.54GB` 降到约 `12.28GB`
 - 但 `~106s` 仍回到约 `14.50GB`，说明 compile 图的主要厚度还留在更深层的状态更新或后续阶段，当前拆分只能改善早期膨胀，尚未改变 `90s+` 平台。
+
+## 2026-03-18 继续压缩 value head-state：移除冗余 max_score 携带
+
+### 本轮动作
+- 在 `value` pass 的 head-state 里，`max_score` 原先被重复携带在 `ContextHeadStatePacket` 中，但它实际上已经在 `score -> value` 边界通过独立数组/word stream 传入。
+- 本轮把该状态包收窄为 `ContextValueHeadStatePacket`，仅保留：
+  1. `denom`
+  2. `accum`
+- 主要调整点：
+  1. `init_context_value_head_state_packet(...)`
+  2. `compute_context_value_head_state_packet(...)`
+  3. `store_context_head_state_packet(...)`
+  4. `process_context_head_group(...)`
+  5. `process_context_value_head_group(...)`
+  6. `prefill_attention_context_query_value_fp(...)`
+- 同时修复了在尝试该改动过程中被局部破坏的 query stream orchestration 区域，恢复了：
+  1. `compute_context_score_tasks(...)`
+  2. `compute_context_value_tasks(...)`
+  3. `prefill_attention_context_block_stream_fp(...)`
+  4. `prefill_attention_context_query_tile_stream_fp(...)`
+
+### 修复后快速验证
+- 重新执行 `timeout 150s env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context`。
+- 结果：
+  1. `analyze` 在 `6.93s` 完成。
+  2. 后续正常进入 `Starting transformation 'compile'`。
+  3. 本次退出原因为外层 `timeout 150s`，不是新的前端 `Error:`。
+- 监控采样点为：
+  1. 约 `16s -> 1532964kB`
+  2. 约 `52s -> 6265324kB`
+  3. 约 `78s -> 12145096kB`
+  4. 约 `110s -> 14438856kB`
+  5. `150s` 前进程树 RSS 维持在约 `13.3GB ~ 13.8GB`
+
+### 当前结论
+- 这一步确认了：`max_score` 不需要继续跟随 value head-state 一起搬运，Catapult 前端也接受这种更窄的状态表达。
+- 与上一轮 value 子阶段拆分相比：
+  1. `~51s` 从约 `6.13GB` 回到约 `6.27GB`
+  2. `~77s` 从约 `12.28GB` 降到约 `12.15GB`
+  3. `~106s` 从约 `14.50GB` 回到约 `14.44GB`
+- 当前判断：移除冗余 `max_score` 携带对 compile 图后半段有轻微收敛，但幅度仍然有限；下一步更可能需要继续压缩 `value` 路径内部状态更新的耦合，或者进一步拆分 `head-group` 级 orchestrator，而不是继续在单个 packet 字段上做细粒度修补。
