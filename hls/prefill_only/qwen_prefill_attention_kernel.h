@@ -6,6 +6,16 @@
 
 namespace llm_accel {
 
+template <typename T>
+struct CatapultTensorView {
+    T* data;
+};
+
+template <typename T>
+struct CatapultConstTensorView {
+    const T* data;
+};
+
 KernelStatus qwen_prefill_attention_kernel(
     const scalar_t* input_sequence,
     int seq_len,
@@ -28,55 +38,55 @@ KernelStatus qwen_prefill_attention_kernel(
     scalar_t* output_sequence);
 
 KernelStatus qwen_prefill_attention_kernel_catapult(
-    const prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize],
+    CatapultConstTensorView<prefill_catapult_fp_t> input_sequence,
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
-    const prefill_catapult_fp_t input_layernorm_weight[kHiddenSize],
+    CatapultConstTensorView<prefill_catapult_fp_t> input_layernorm_weight,
     prefill_catapult_fp_t rms_eps,
-    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
-    const packed_w4_t k_packed_weights[kPrefillCatapultKvWidth * kHiddenSize / 2],
-    const packed_w4_t v_packed_weights[kPrefillCatapultKvWidth * kHiddenSize / 2],
-    const packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2],
-    const prefill_catapult_fp_t q_bias[kHiddenSize],
-    const prefill_catapult_fp_t k_bias[kPrefillCatapultKvWidth],
-    const prefill_catapult_fp_t v_bias[kPrefillCatapultKvWidth],
-    const prefill_catapult_fp_t q_scales[kHiddenSize],
-    const prefill_catapult_fp_t k_scales[kPrefillCatapultKvWidth],
-    const prefill_catapult_fp_t v_scales[kPrefillCatapultKvWidth],
-    const prefill_catapult_fp_t o_scales[kHiddenSize],
-    prefill_catapult_fp_t k_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
-    prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
-    prefill_catapult_fp_t output_sequence[kPrefillCatapultSeqCapacity * kHiddenSize]);
+    CatapultConstTensorView<packed_w4_t> q_packed_weights,
+    CatapultConstTensorView<packed_w4_t> k_packed_weights,
+    CatapultConstTensorView<packed_w4_t> v_packed_weights,
+    CatapultConstTensorView<packed_w4_t> o_packed_weights,
+    CatapultConstTensorView<prefill_catapult_fp_t> q_bias,
+    CatapultConstTensorView<prefill_catapult_fp_t> k_bias,
+    CatapultConstTensorView<prefill_catapult_fp_t> v_bias,
+    CatapultConstTensorView<prefill_catapult_fp_t> q_scales,
+    CatapultConstTensorView<prefill_catapult_fp_t> k_scales,
+    CatapultConstTensorView<prefill_catapult_fp_t> v_scales,
+    CatapultConstTensorView<prefill_catapult_fp_t> o_scales,
+    CatapultTensorView<prefill_catapult_fp_t> k_cache,
+    CatapultTensorView<prefill_catapult_fp_t> v_cache,
+    CatapultTensorView<prefill_catapult_fp_t> output_sequence);
 
 void qwen_prefill_attention_kv_cache_stage_catapult(
-    const prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize],
+    CatapultConstTensorView<prefill_catapult_fp_t> input_sequence,
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
-    const prefill_catapult_fp_t input_layernorm_weight[kHiddenSize],
+    CatapultConstTensorView<prefill_catapult_fp_t> input_layernorm_weight,
     prefill_catapult_fp_t rms_eps,
-    const packed_w4_t k_packed_weights[kPrefillCatapultKvWidth * kHiddenSize / 2],
-    const packed_w4_t v_packed_weights[kPrefillCatapultKvWidth * kHiddenSize / 2],
-    const prefill_catapult_fp_t k_bias[kPrefillCatapultKvWidth],
-    const prefill_catapult_fp_t v_bias[kPrefillCatapultKvWidth],
-    const prefill_catapult_fp_t k_scales[kPrefillCatapultKvWidth],
-    const prefill_catapult_fp_t v_scales[kPrefillCatapultKvWidth],
-    prefill_catapult_fp_t k_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
-    prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth]);
+    CatapultConstTensorView<packed_w4_t> k_packed_weights,
+    CatapultConstTensorView<packed_w4_t> v_packed_weights,
+    CatapultConstTensorView<prefill_catapult_fp_t> k_bias,
+    CatapultConstTensorView<prefill_catapult_fp_t> v_bias,
+    CatapultConstTensorView<prefill_catapult_fp_t> k_scales,
+    CatapultConstTensorView<prefill_catapult_fp_t> v_scales,
+    CatapultTensorView<prefill_catapult_fp_t> k_cache,
+    CatapultTensorView<prefill_catapult_fp_t> v_cache);
 
 void qwen_prefill_attention_q_context_output_stage_catapult(
-    const prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize],
+    CatapultConstTensorView<prefill_catapult_fp_t> input_sequence,
     int seq_len,
     const PrefillAttentionTileConfig& tile_config,
-    const prefill_catapult_fp_t input_layernorm_weight[kHiddenSize],
+    CatapultConstTensorView<prefill_catapult_fp_t> input_layernorm_weight,
     prefill_catapult_fp_t rms_eps,
-    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
-    const prefill_catapult_fp_t q_bias[kHiddenSize],
-    const prefill_catapult_fp_t q_scales[kHiddenSize],
-    const prefill_catapult_fp_t k_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
-    const prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
-    const packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2],
-    const prefill_catapult_fp_t o_scales[kHiddenSize],
-    prefill_catapult_fp_t output_sequence[kPrefillCatapultSeqCapacity * kHiddenSize]);
+    CatapultConstTensorView<packed_w4_t> q_packed_weights,
+    CatapultConstTensorView<prefill_catapult_fp_t> q_bias,
+    CatapultConstTensorView<prefill_catapult_fp_t> q_scales,
+    CatapultConstTensorView<prefill_catapult_fp_t> k_cache,
+    CatapultConstTensorView<prefill_catapult_fp_t> v_cache,
+    CatapultConstTensorView<packed_w4_t> o_packed_weights,
+    CatapultConstTensorView<prefill_catapult_fp_t> o_scales,
+    CatapultTensorView<prefill_catapult_fp_t> output_sequence);
 
 void qwen_prefill_attention_qkv_rope_stage_catapult(
     const prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize],

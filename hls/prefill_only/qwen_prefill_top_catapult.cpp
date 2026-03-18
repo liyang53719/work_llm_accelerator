@@ -160,25 +160,25 @@ KernelStatus qwen_prefill_top_catapult(
   const prefill_catapult_fp_t* down_scales = fp_ptr(scale_ddr, layer_scales_base_addr + layout.down_scale_offset_bytes);
 
   const KernelStatus attention_status = qwen_prefill_attention_kernel_catapult(
-      input_sequence,
+      {input_sequence},
       seq_len,
       tile_config.attention,
-      input_layernorm_weight,
+      {input_layernorm_weight},
       prefill_catapult_fp_t(kRmsNormEps),
-      q_weights,
-      k_weights,
-      v_weights,
-      o_weights,
-      q_bias,
-      k_bias,
-      v_bias,
-      q_scales,
-      k_scales,
-      v_scales,
-      o_scales,
-      k_cache,
-      v_cache,
-      attention_scratch);
+      {q_weights},
+      {k_weights},
+      {v_weights},
+      {o_weights},
+      {q_bias},
+      {k_bias},
+      {v_bias},
+      {q_scales},
+      {k_scales},
+      {v_scales},
+      {o_scales},
+      {k_cache},
+      {v_cache},
+      {attention_scratch});
   if (!attention_status.ok) {
     return attention_status;
   }
@@ -297,33 +297,33 @@ KernelStatus qwen_prefill_top_catapult_fine(
   const prefill_catapult_fp_t* down_scales = fp_ptr(scale_ddr, layer_scales_base_addr + layout.down_scale_offset_bytes);
 
     qwen_prefill_attention_kv_cache_stage_catapult(
-      input_sequence,
+      {input_sequence},
       seq_len,
       tile_config.attention,
-      input_layernorm_weight,
+      {input_layernorm_weight},
       prefill_catapult_fp_t(kRmsNormEps),
-      k_weights,
-      v_weights,
-      k_bias,
-      v_bias,
-      k_scales,
-      v_scales,
-      k_cache,
-      v_cache);
+      {k_weights},
+      {v_weights},
+      {k_bias},
+      {v_bias},
+      {k_scales},
+      {v_scales},
+      {k_cache},
+      {v_cache});
     qwen_prefill_attention_q_context_output_stage_catapult(
-      input_sequence,
+      {input_sequence},
       seq_len,
       tile_config.attention,
-      input_layernorm_weight,
+      {input_layernorm_weight},
       prefill_catapult_fp_t(kRmsNormEps),
-      q_weights,
-      q_bias,
-      q_scales,
-      k_cache,
-      v_cache,
-      o_weights,
-      o_scales,
-      attention_scratch);
+      {q_weights},
+      {q_bias},
+      {q_scales},
+      {k_cache},
+      {v_cache},
+      {o_weights},
+      {o_scales},
+      {attention_scratch});
 
   (void)weight_sram;
   (void)kv_sram;
