@@ -776,6 +776,17 @@ struct ContextScorePacket {
   catapult_fp_t data[llm_accel::kNumAttentionHeads];
 };
 
+struct ContextHeadStatePacket {
+  catapult_fp_t max_score[llm_accel::kNumAttentionHeads];
+  catapult_fp_t denom[llm_accel::kNumAttentionHeads];
+  catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim];
+};
+
+struct ContextKeyTileMetaPacket {
+  int key_begin;
+  int key_end;
+};
+
 void load_context_kv_token_packet(
     const catapult_fp_t* k_proj,
     const catapult_fp_t* v_proj,
@@ -986,25 +997,23 @@ ATTN_CONTEXT_VALUE_KEY_LOOP:
   }
 }
 
-void attention_max_score_pass_fp(
+void compute_context_max_score_tile_tasks(
     const catapult_fp_t* q_token,
     const catapult_fp_t* k_proj,
-    int seq_len,
-    int query_index,
-    int key_tile,
     int head_base,
     int head_end,
+    int key_tile_count,
+    ac_channel<ContextKeyTileMetaPacket>& key_tile_meta_chan,
     catapult_fp_t max_score[llm_accel::kNumAttentionHeads]) {
   const catapult_fp_t attention_scaling = fp_const(0.08838834764831845f);
 
-  for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
-    const int query_limit = query_index + 1;
-    const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
+  for (int tile_slot = 0; tile_slot < key_tile_count; ++tile_slot) {
+    const ContextKeyTileMetaPacket meta_packet = key_tile_meta_chan.read();
     process_context_max_score_tile(
         q_token,
         k_proj,
-        key_begin,
-        key_end,
+        meta_packet.key_begin,
+        meta_packet.key_end,
         head_base,
         head_end,
         attention_scaling,
@@ -1012,29 +1021,27 @@ void attention_max_score_pass_fp(
   }
 }
 
-void attention_value_accum_pass_fp(
+void compute_context_value_tile_tasks(
     const catapult_fp_t* q_token,
     const catapult_fp_t* k_proj,
     const catapult_fp_t* v_proj,
-    int seq_len,
-    int query_index,
-    int key_tile,
     int head_base,
     int head_end,
+    int key_tile_count,
+    ac_channel<ContextKeyTileMetaPacket>& key_tile_meta_chan,
     const catapult_fp_t max_score[llm_accel::kNumAttentionHeads],
     catapult_fp_t denom[llm_accel::kNumAttentionHeads],
     catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim]) {
   const catapult_fp_t attention_scaling = fp_const(0.08838834764831845f);
 
-  for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
-    const int query_limit = query_index + 1;
-    const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
+  for (int tile_slot = 0; tile_slot < key_tile_count; ++tile_slot) {
+    const ContextKeyTileMetaPacket meta_packet = key_tile_meta_chan.read();
     process_context_value_tile(
         q_token,
         k_proj,
         v_proj,
-        key_begin,
-        key_end,
+        meta_packet.key_begin,
+        meta_packet.key_end,
         head_base,
         head_end,
         attention_scaling,
@@ -1043,12 +1050,6 @@ void attention_value_accum_pass_fp(
         accum);
   }
 }
-
-struct ContextHeadStatePacket {
-  catapult_fp_t max_score[llm_accel::kNumAttentionHeads];
-  catapult_fp_t denom[llm_accel::kNumAttentionHeads];
-  catapult_fp_t accum[llm_accel::kNumAttentionHeads][llm_accel::kHeadDim];
-};
 
 struct ContextQueryPacket {
   catapult_fp_t data[llm_accel::kHiddenSize];
@@ -1113,6 +1114,37 @@ void init_context_result_meta_packet(
     int query_offset,
     ContextResultMetaPacket* packet) {
   packet->query_offset = query_offset;
+}
+
+void init_context_key_tile_meta_packet(
+    int key_begin,
+    int key_end,
+    ContextKeyTileMetaPacket* packet) {
+  packet->key_begin = key_begin;
+  packet->key_end = key_end;
+}
+
+int count_context_key_tiles(
+    int seq_len,
+    int query_index,
+    int key_tile) {
+  const int query_limit = min_int(seq_len, query_index + 1);
+  return (query_limit + key_tile - 1) / key_tile;
+}
+
+void stream_context_key_tile_meta_packets(
+    int seq_len,
+    int query_index,
+    int key_tile,
+    ac_channel<ContextKeyTileMetaPacket>& key_tile_meta_chan) {
+  for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
+    ContextKeyTileMetaPacket meta_packet;
+    const int query_limit = query_index + 1;
+    const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
+
+    init_context_key_tile_meta_packet(key_begin, key_end, &meta_packet);
+    key_tile_meta_chan.write(meta_packet);
+  }
 }
 
 void load_context_fp_word_packet(
@@ -1241,14 +1273,17 @@ void compute_context_max_score_head_state_packet(
     int head_base,
     int head_end,
     catapult_fp_t max_score[llm_accel::kNumAttentionHeads]) {
-  attention_max_score_pass_fp(
+  ac_channel<ContextKeyTileMetaPacket> key_tile_meta_chan;
+  const int key_tile_count = count_context_key_tiles(seq_len, query_index, key_tile);
+
+  stream_context_key_tile_meta_packets(seq_len, query_index, key_tile, key_tile_meta_chan);
+  compute_context_max_score_tile_tasks(
       q_token,
       k_proj,
-      seq_len,
-      query_index,
-      key_tile,
       head_base,
       head_end,
+      key_tile_count,
+      key_tile_meta_chan,
       max_score);
 }
 
@@ -1262,15 +1297,18 @@ void compute_context_value_head_state_packet(
     int head_base,
     int head_end,
     ContextHeadStatePacket* packet) {
-  attention_value_accum_pass_fp(
+  ac_channel<ContextKeyTileMetaPacket> key_tile_meta_chan;
+  const int key_tile_count = count_context_key_tiles(seq_len, query_index, key_tile);
+
+  stream_context_key_tile_meta_packets(seq_len, query_index, key_tile, key_tile_meta_chan);
+  compute_context_value_tile_tasks(
       q_token,
       k_proj,
       v_proj,
-      seq_len,
-      query_index,
-      key_tile,
       head_base,
       head_end,
+      key_tile_count,
+      key_tile_meta_chan,
       packet->max_score,
       packet->denom,
       packet->accum);

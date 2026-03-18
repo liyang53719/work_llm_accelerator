@@ -245,3 +245,44 @@
   2. `59.94s` 从约 `10.74GB` 回到约 `11.88GB`
   3. `89.9s` 后仍回到 `14.44GB`
 - 因此目前看，`score core` 的 `K/V` 包结构不是 compile 内存的主要矛盾；下一步仍应回到更高层的循环图切分，优先考虑 `head-group` / `key-tile` 级边界，而不是继续在单 key helper 上做局部瘦身。
+
+## 2026-03-18 继续压缩循环图：key-tile 元数据分阶段
+
+### 本轮动作
+- 继续沿着 `head-group / key-tile` 边界做显式分阶段，把 `max score` 和 `value accumulate` 两个 pass 里原先直接展开的 `key_tile` 循环提取成元数据驱动的任务流：
+  1. 新增 `ContextKeyTileMetaPacket`
+  2. 新增 `init_context_key_tile_meta_packet(...)`
+  3. 新增 `count_context_key_tiles(...)`
+  4. 新增 `stream_context_key_tile_meta_packets(...)`
+  5. 新增 `compute_context_max_score_tile_tasks(...)`
+  6. 新增 `compute_context_value_tile_tasks(...)`
+- `compute_context_max_score_head_state_packet(...)` 与 `compute_context_value_head_state_packet(...)` 改为先生成 `key_tile` 元数据流，再分别消费该流完成 tile 级 pass。
+
+### 首次验证与修复
+- 第一次快速验证没有进入 `compile`，而是在 `analyze` 前端失败。
+- 失败原因不是算法逻辑，而是 Catapult EDG 对类型声明顺序更严格：
+  1. `ContextKeyTileMetaPacket` 初版仍定义在使用它的函数签名之后。
+  2. `work/tmp/catapult_prefill_attention_context_latest.log` 报出 `CRD-20`：
+     - `qwen_prefill_attention_context_stage_catapult.cpp(995)`
+     - `qwen_prefill_attention_context_stage_catapult.cpp(1000)`
+     - `qwen_prefill_attention_context_stage_catapult.cpp(1020)`
+     - `qwen_prefill_attention_context_stage_catapult.cpp(1027)`
+- 修复方式：把 `ContextHeadStatePacket` 与 `ContextKeyTileMetaPacket` 一并前移到 packet 定义区，放到所有相关函数签名之前。
+
+### 修复后快速验证
+- 重新执行 `timeout 150s env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context`。
+- 结果：
+  1. `analyze` 已恢复通过，日志记录为 `6.95s`。
+  2. 随后正常进入 `Starting transformation 'compile'`。
+  3. 本次退出原因为外层 `timeout 150s`，不是新的前端 `Error:`。
+- 监控采样点显示这轮已回到有效 compile 入口：
+  1. 约 `16s -> 1532964kB`
+  2. 约 `52s -> 6461932kB`
+  3. 约 `78s -> 12538312kB`
+  4. 约 `109s -> 14438856kB`
+  5. 直到 `150s` 超时前，进程树 RSS 仍维持在约 `13.4GB ~ 13.8GB`
+
+### 当前结论
+- 这一步的直接价值是把 `key_tile` 循环正式提升为显式 stage 边界，并确认 Catapult 前端可以接受该结构。
+- 从 `analyze -> compile` 入场表现看，它没有比上一轮更差，也没有立即拉低 `90s+` 区间的内存平台。
+- 因此当前主矛盾进一步收敛到：仅仅把 `key_tile` 变成元数据驱动 stage 还不够，后续仍需要继续拆 `softmax / value accumulate` 内部的厚状态更新，或者进一步减少单个 stage 中携带的 head-state 体积。
