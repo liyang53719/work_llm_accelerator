@@ -54,6 +54,28 @@
 - 中期：继续按 `cache reader -> score core -> softmax/context core` 三段式拆分 context 主体，而不是只在外层增加 channel 痕迹。
 - 提交时应包含守卫脚本、Makefile 接线、context 专用翻译单元、Tcl 调整和本日志更新。
 
+## 2026-03-18 后续推进：query 级内部三段化
+
+### 本轮动作
+- 在 `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp` 内，把 `prefill_attention_context_block_fp` 和 `prefill_attention_context_query_tile_fp` 从“单循环内直接 load + compute + store”改成内部三段：
+  1. `stream_context_query_tasks_*` 负责 query loader
+  2. `compute_context_query_tasks` 负责 query compute
+  3. `store_context_result_packets` 负责 result store
+- 三段之间通过 `ac_channel<ContextQueryTaskPacket>` 和 `ac_channel<ContextResultPacket>` 连接，保持外部函数签名不变。
+
+### 当前意义
+- 这一步还没有把 `context` 主体彻底拆成 `cache reader -> score core -> softmax/context core`，但已经把最外层 query 调度从单块串行逻辑改成了显式的 loader / compute / store 结构。
+- 这样后续继续向 `score core` 与 `softmax/context core` 内部分裂时，不需要再重复改 query 级调度骨架。
+
+### 本轮快速验证
+- 使用 `QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context` 做前端入场验证。
+- 结果：未出现新的前端 `Error:`，仍然可以稳定完成 `analyze` 并进入 `compile`。
+- 早期 compile 曲线仍与上一轮相近：
+  - `29.97s -> 6068716kB`
+  - `59.95s -> 12079560kB`
+  - `89.95s -> 14438856kB`
+- 结论：这次 query 级三段化至少没有破坏已有 compile 入口；是否能改变后半段内存失控，还需要后续长跑观察。
+
 ### 后续验证
 - 重新运行 context flow，观察：
   1. `Found design routine` 的数量是否明显下降。
