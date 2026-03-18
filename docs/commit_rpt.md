@@ -139,3 +139,35 @@
 - `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp`
 - `script/run_catapult_prefill_attention_context.tcl`
 - `docs/commit_rpt.md`
+
+## 2026-03-18 继续收敛：kv_cache channel 边界压到 256bit
+
+### 本轮动作
+- `hls/prefill_only/qwen_prefill_attention_kv_cache_stage.cpp` 原先的 stream top 仍使用整 tile packet：
+  1. `KvFpTilePacket`：`64 x fp32 = 2048bit`
+  2. `KvPackedTilePairPacket`：`K/V` 双路打包后远超 `256bit`
+  3. `KvScaleTilePairPacket`：`K/V` 双路 scale 整 tile
+  4. `KvPartialTilePairPacket`：`K/V` 双路 partial sum 整 tile
+- 本轮保持 `qwen_prefill_attention_kv_tile_array_core(...)` 不变，只把 stream top 边界改成 word stream：
+  1. `KvFpWordPacket`：`8 x fp32 = 256bit`
+  2. `KvPackedWordPacket`：`32 x packed_w4_t = 256bit`
+  3. 原先 `K/V` 成对大包在 channel 边界拆成独立 `K` / `V` word channel
+- 这样 `input`、`layernorm weight`、`packed weight`、`scale`、`partial sum` 几类搬运都满足新的 `256bit` 上限，tile 级本地数组只留在 core 内部。
+
+### 当前判断
+- 这一步的目标仍然是先消除接口位宽违规，不直接承诺会改善 `context` compile 内存。
+- 但它补齐了 `kv_cache` 这条主路径上最明显的 oversized channel，避免后续在同类 stream top 上继续引入超宽包。
+
+### 待验证
+- 需要对 `QWEN_HLS_ENABLE_EXTRACT=0 make catapult_prefill_attention_kv_cache` 做快速入场验证，至少确认：
+  1. 没有新的前端 `Error:`
+  2. `analyze` 能完成
+  3. `compile` 能启动
+
+### 本轮快速验证
+- 使用 `timeout 120s env QWEN_HLS_ENABLE_EXTRACT=0 make catapult_prefill_attention_kv_cache` 做有时限的快速入场验证，避免 `kv_cache` flow 在首次 compile 时无界运行。
+- 结果：
+  1. `work/tmp/catapult_prefill_attention_kv_cache_latest.log` 记录到 `Starting transformation 'analyze'`。
+  2. 同一日志继续进入 `Starting transformation 'compile'`。
+  3. 未观察到新的前端 `Error:`；输出里只看到与此前一致的 `CRD-1`、`CRD-68`、`CRD-111`、`CRD-541` 类告警。
+- 结论：`kv_cache` 的 256bit word-stream 改造至少没有破坏 Catapult 前端入场，当前可以作为独立 checkpoint 提交。
