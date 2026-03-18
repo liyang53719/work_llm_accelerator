@@ -171,3 +171,45 @@
   2. 同一日志继续进入 `Starting transformation 'compile'`。
   3. 未观察到新的前端 `Error:`；输出里只看到与此前一致的 `CRD-1`、`CRD-68`、`CRD-111`、`CRD-541` 类告警。
 - 结论：`kv_cache` 的 256bit word-stream 改造至少没有破坏 Catapult 前端入场，当前可以作为独立 checkpoint 提交。
+
+## 2026-03-18 回到主线：context compute 再拆一层
+
+### 本轮动作
+- `compute_context_query_tasks(...)` 原先仍把整条 query 计算压在一段里：
+  1. 读入 query
+  2. 完整跑 `max score` pass
+  3. 再完整跑 `softmax/value accumulate` pass
+  4. 直接输出 context token
+- 本轮把它拆成两个显式阶段：
+  1. `compute_context_score_tasks(...)` 只负责 `max score` pass
+  2. `compute_context_value_tasks(...)` 只负责 `softmax/value accumulate` 与结果写出
+- 中间只通过 `256bit` word channel 传两类数据：
+  1. 继续转发 query token 的 `ContextFpWordPacket`
+  2. 新增 `max_score` 的 `ContextFpWordPacket` 流，按 `12` 个 head score 分成 `2` 个 word packet 传递
+
+### 当前意义
+- 这一步开始真正把 `context` 主体从“单个厚 query compute”切成 `score core` 和 `softmax/context core` 两段，而不只是做外围 loader / store 包装。
+- 中间态没有引入新的超宽 `ac_channel`，仍保持在 `256bit` 上限之内。
+
+### 待验证
+- 需要重新执行 `QWEN_HLS_ENABLE_EXTRACT=0 make catapult_prefill_attention_context`，确认：
+  1. 没有新的前端 `Error:`
+  2. `analyze` 能完成
+  3. `compile` 仍可进入
+  4. 早期 compile 内存是否有可见变化
+
+### 本轮快速验证
+- 使用 `timeout 140s env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context` 做带守卫的快速验证。
+- 结果：
+  1. `work/tmp/catapult_prefill_attention_context_latest.log` 记录到 `Completed transformation 'analyze'`，`analyze` 在 `8.77s` 完成。
+  2. 同一日志继续进入 `Starting transformation 'compile'`。
+  3. 未观察到新的前端 `Error:`；仍然只有既有的 `CRD-68`、`CRD-111` 等告警。
+  4. 早期 compile 曲线为：
+     - `29.95s -> 5346268kB`
+     - `59.94s -> 10736328kB`
+     - `89.93s -> 14438856kB`
+- 对比上一轮 query-channel 256bit 改造后的快速验证：
+  1. `29.99s -> 5454380kB` 降到 `5346268kB`
+  2. `59.97s -> 10965448kB` 降到 `10736328kB`
+  3. `89.96s -> 14438856kB` 基本持平
+- 当前结论：把 `context` 主体继续拆成 `score core + softmax/value core` 对 compile 早期内存有轻微改善，但 90 秒附近仍回到此前量级，说明后续还需要继续压缩更深层的计算图，而不是停在 query 级两段化。
