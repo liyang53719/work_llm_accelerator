@@ -768,6 +768,10 @@ struct ContextKvTokenPacket {
   catapult_fp_t v_data[kKvWidth];
 };
 
+struct ContextKTokenPacket {
+  catapult_fp_t k_data[kKvWidth];
+};
+
 struct ContextScorePacket {
   catapult_fp_t data[llm_accel::kNumAttentionHeads];
 };
@@ -781,6 +785,16 @@ void load_context_kv_token_packet(
   for (int dim = 0; dim < kKvWidth; ++dim) {
     packet->k_data[dim] = k_proj[key_index * kKvWidth + dim];
     packet->v_data[dim] = v_proj[key_index * kKvWidth + dim];
+  }
+}
+
+void load_context_k_token_packet(
+    const catapult_fp_t* k_proj,
+    int key_index,
+    ContextKTokenPacket* packet) {
+#pragma hls_unroll yes
+  for (int dim = 0; dim < kKvWidth; ++dim) {
+    packet->k_data[dim] = k_proj[key_index * kKvWidth + dim];
   }
 }
 
@@ -798,6 +812,26 @@ void compute_context_score_packet(
       const int kv_head = head / kNumGroups;
       const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
       const catapult_fp_t* k_head = kv_packet.k_data + kv_head * llm_accel::kHeadDim;
+      const catapult_fp_t score = dot_product_128_fp(q_head, k_head);
+      packet->data[head_offset] = fp_mul_op(score, attention_scaling);
+    }
+  }
+}
+
+void compute_context_score_packet(
+    const catapult_fp_t* q_token,
+    const ContextKTokenPacket& k_packet,
+    int head_base,
+    int head_end,
+    catapult_fp_t attention_scaling,
+    ContextScorePacket* packet) {
+#pragma hls_unroll yes
+  for (int head_offset = 0; head_offset < llm_accel::kNumAttentionHeads; ++head_offset) {
+    if (head_base + head_offset < head_end) {
+      const int head = head_base + head_offset;
+      const int kv_head = head / kNumGroups;
+      const catapult_fp_t* q_head = q_token + head * llm_accel::kHeadDim;
+      const catapult_fp_t* k_head = k_packet.k_data + kv_head * llm_accel::kHeadDim;
       const catapult_fp_t score = dot_product_128_fp(q_head, k_head);
       packet->data[head_offset] = fp_mul_op(score, attention_scaling);
     }
@@ -860,18 +894,10 @@ void process_context_max_score_key(
     int head_end,
     catapult_fp_t attention_scaling,
     catapult_fp_t max_score[llm_accel::kNumAttentionHeads]) {
-  ContextKvTokenPacket kv_packet;
+  ContextKTokenPacket k_packet;
   ContextScorePacket score_packet;
-  process_context_score_key(
-      q_token,
-      k_proj,
-      k_proj,
-      key_index,
-      head_base,
-      head_end,
-      attention_scaling,
-      &kv_packet,
-      &score_packet);
+  load_context_k_token_packet(k_proj, key_index, &k_packet);
+  compute_context_score_packet(q_token, k_packet, head_base, head_end, attention_scaling, &score_packet);
   update_context_max_score_packet(score_packet, head_base, head_end, max_score);
 }
 
@@ -1850,9 +1876,9 @@ void init_hidden_proj_partial_tile_packet(
     HiddenProjPartialTilePacket* packet) {
   for (int index = 0; index < kProjectionTileCapacity; ++index) {
     if (index < out_extent) {
-      packet->data[index] = bias == nullptr ? fp_zero() : bias[out_base + index];
+      packet->data[index] = bias == nullptr ? prefill_catapult_fp_t(0.0f) : bias[out_base + index];
     } else {
-      packet->data[index] = fp_zero();
+      packet->data[index] = prefill_catapult_fp_t(0.0f);
     }
   }
 }

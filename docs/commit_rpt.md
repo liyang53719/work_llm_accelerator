@@ -213,3 +213,35 @@
   2. `59.97s -> 10965448kB` 降到 `10736328kB`
   3. `89.96s -> 14438856kB` 基本持平
 - 当前结论：把 `context` 主体继续拆成 `score core + softmax/value core` 对 compile 早期内存有轻微改善，但 90 秒附近仍回到此前量级，说明后续还需要继续压缩更深层的计算图，而不是停在 query 级两段化。
+
+## 2026-03-18 继续压缩 score core：max-score 改成 K-only packet
+
+### 本轮动作
+- `process_context_max_score_key(...)` 之前虽然只需要 `K`，但仍复用了 `ContextKvTokenPacket` 路径，并把 `k_proj` 伪装成 `v_proj` 传入，等于在 `max score` pass 里仍构造了一份冗余的 `V` 侧数据通路。
+- 本轮改成：
+  1. 新增 `ContextKTokenPacket`
+  2. 新增 `load_context_k_token_packet(...)`
+  3. 为 `compute_context_score_packet(...)` 增加 `K-only` 重载
+  4. `process_context_max_score_key(...)` 不再走 `ContextKvTokenPacket`
+
+### 预期
+- 目标是继续缩小 `score core` 内部数据结构和依赖图，避免 `max score` pass 带着不需要的 `V` 路径一起被编译展开。
+
+### 本轮快速验证
+- 使用 `timeout 140s env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context` 再做一次带守卫的快速验证。
+- 结果：
+  1. `analyze` 仍然完成，日志记录为 `7.43s`。
+  2. `compile` 仍然正常进入。
+  3. 未观察到新的前端 `Error:`。
+  4. 早期 compile 曲线为：
+     - `29.98s -> 6068716kB`
+     - `59.96s -> 11882952kB`
+     - `89.95s -> 14438856kB`
+     - `119.94s -> 14438856kB`
+
+### 当前结论
+- 这次 `K-only` 化没有破坏 compile 入口，但对早期内存没有带来正收益，反而比上一轮 `score/value` 两段化略高：
+  1. `29.95s` 从约 `5.35GB` 回到约 `6.07GB`
+  2. `59.94s` 从约 `10.74GB` 回到约 `11.88GB`
+  3. `89.9s` 后仍回到 `14.44GB`
+- 因此目前看，`score core` 的 `K/V` 包结构不是 compile 内存的主要矛盾；下一步仍应回到更高层的循环图切分，优先考虑 `head-group` / `key-tile` 级边界，而不是继续在单 key helper 上做局部瘦身。
