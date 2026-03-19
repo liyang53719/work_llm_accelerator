@@ -1,8 +1,6 @@
 #include "qwen_prefill_attention_kernel.h"
 #include "../include/ac_channel.h"
 
-#include <type_traits>
-
 #ifdef __SYNTHESIS__
 #include "../include/ac_int.h"
 #include "../include/ac_std_float.h"
@@ -429,7 +427,7 @@ void rmsnorm_token_fp(
 }
 
 template <typename Head>
-void apply_rope_inplace_fp(Head& head, int token_index) {
+void apply_rope_inplace_fp(Head head, int token_index) {
   catapult_fp_t inv_freq = fp_one();
   const catapult_fp_t token_index_fp = fp_const_int(token_index);
   const catapult_fp_t rope_step = fp_const(0.8058421877614801f);
@@ -1594,8 +1592,8 @@ void project_tiled_token_fp_impl(
     int out_tile,
     int in_tile,
   OutputToken& output) {
-  prefill_catapult_fp_t input_tile[kProjectionTileCapacity];
-  prefill_catapult_fp_t partial_sum[kProjectionTileCapacity];
+  catapult_fp_t input_tile[kProjectionTileCapacity];
+  catapult_fp_t partial_sum[kProjectionTileCapacity];
 
   for (int out_base = 0; out_base < OutDim; out_base += out_tile) {
     const int out_extent = min_int(out_tile, OutDim - out_base);
@@ -1743,17 +1741,28 @@ void read_hidden_proj_packed_weight_tile_packet(
   }
 }
 
-template <typename InputToken, typename InputLayernormWeight, typename PackedWeights, typename Bias, typename Scales, typename OutputToken>
+inline prefill_catapult_fp_t hidden_proj_input_value(
+    prefill_catapult_fp_t input_value,
+    const prefill_catapult_fp_t* input_layernorm_weight,
+    int index,
+    prefill_catapult_fp_t inv_rms,
+    bool apply_rmsnorm) {
+  if (apply_rmsnorm && input_layernorm_weight != 0) {
+    input_value = input_value * inv_rms * input_layernorm_weight[index];
+  }
+  return input_value;
+}
+
 void project_hidden_token_tilewise_fp(
-    const InputToken& input_token,
-    const InputLayernormWeight& input_layernorm_weight,
-    const PackedWeights& packed_weights,
-    const Bias& bias,
-    const Scales& scales,
+    const prefill_catapult_fp_t* input_token,
+    const prefill_catapult_fp_t* input_layernorm_weight,
+    const packed_w4_t* packed_weights,
+    const prefill_catapult_fp_t* bias,
+    const prefill_catapult_fp_t* scales,
     prefill_catapult_fp_t inv_rms,
     int tile_span,
     bool apply_rmsnorm,
-    OutputToken& output_token) {
+    prefill_catapult_fp_t* output_token) {
 #ifdef __SYNTHESIS__
   const int proj_tile = min_int(kProjectionTileCapacity, max_int(1, tile_span));
   prefill_catapult_fp_t input_tile[kProjectionTileCapacity];
@@ -1763,23 +1772,19 @@ void project_hidden_token_tilewise_fp(
     const int out_extent = min_int(proj_tile, kHiddenSize - out_base);
 
     for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
-      if constexpr (std::is_same_v<std::decay_t<Bias>, std::nullptr_t>) {
-        partial_sum[out_offset] = fp_zero();
-      } else {
-        partial_sum[out_offset] = bias[out_base + out_offset];
-      }
+      partial_sum[out_offset] = bias != 0 ? bias[out_base + out_offset] : prefill_catapult_fp_t(0.0f);
     }
 
     for (int in_base = 0; in_base < kHiddenSize; in_base += proj_tile) {
       const int in_extent = min_int(proj_tile, kHiddenSize - in_base);
 
       for (int in_offset = 0; in_offset < in_extent; ++in_offset) {
-        prefill_catapult_fp_t input_value = input_token[in_base + in_offset];
-        if constexpr (!std::is_same_v<std::decay_t<InputLayernormWeight>, std::nullptr_t>) {
-          if (apply_rmsnorm) {
-            input_value = fp_mul_op(fp_mul_op(input_value, inv_rms), input_layernorm_weight[in_base + in_offset]);
-          }
-        }
+        prefill_catapult_fp_t input_value = hidden_proj_input_value(
+            input_token[in_base + in_offset],
+            input_layernorm_weight,
+            in_base + in_offset,
+            inv_rms,
+            apply_rmsnorm);
         input_tile[in_offset] = input_value;
       }
 
@@ -1815,16 +1820,14 @@ void project_hidden_token_tilewise_fp(
 
     for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
       const int out_index = out_base + out_offset;
-      prefill_catapult_fp_t accum = std::is_same_v<std::decay_t<Bias>, std::nullptr_t>
-          ? prefill_catapult_fp_t(0.0f)
-          : bias[out_index];
+      prefill_catapult_fp_t accum = bias != 0 ? bias[out_index] : prefill_catapult_fp_t(0.0f);
       for (int in_index = 0; in_index < kHiddenSize; ++in_index) {
-        prefill_catapult_fp_t input_value = input_token[in_index];
-        if constexpr (!std::is_same_v<std::decay_t<InputLayernormWeight>, std::nullptr_t>) {
-          if (apply_rmsnorm) {
-            input_value = input_value * inv_rms * input_layernorm_weight[in_index];
-          }
-        }
+        prefill_catapult_fp_t input_value = hidden_proj_input_value(
+            input_token[in_index],
+            input_layernorm_weight,
+            in_index,
+            inv_rms,
+            apply_rmsnorm);
         const int flat_index = out_index * kHiddenSize + in_index;
         const packed_w4_t packed_value = packed_weights[flat_index / 2];
         const bool high_nibble = (flat_index & 1) != 0;
