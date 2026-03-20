@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../catapult_shims/cstdint.h"
+#include <cstdint>
 
 namespace llm_accel {
 

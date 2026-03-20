@@ -1,6 +1,0 @@
-#ifndef TVM_WORK_LLM_ACCELERATOR_INCLUDE_IOSTREAM_NOEXT
-#define TVM_WORK_LLM_ACCELERATOR_INCLUDE_IOSTREAM_NOEXT
-
-#include "../catapult_shims/iostream.h"
-
-#endif
