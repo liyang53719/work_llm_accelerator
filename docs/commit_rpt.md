@@ -253,6 +253,168 @@
   3. 日志中可见 Catapult 继续对 `qwen_prefill_attention_context_query_tile_stream_catapult`、`prefill_attention_context_score_stream_stage_fp`、`prefill_attention_context_value_stream_stage_fp` 做 `Inlining routine ...`，说明仅把 top_function 切到 stream top 还不足以阻止 compile 图重新膨胀
 - 因此当前更像是“接口形状整改完成，但 compile 图边界仍未被 Catapult 真正保留”。下一步应优先研究如何阻止这些 stage 在 compile 中被重新 inline，而不是再回到数组 top 上做外围包装。
 
+### 后续文档核对与 Tcl 试验
+- 继续查本地 Catapult 2026.1 安装目录中的 methodology 示例，重点核对：
+  1. `CCORE_Stagewise_Enable`
+  2. `mpccore`
+  3. `ParallelCCORE`
+
+## 2026-03-18 真正的边界重构：score/value child-top 去掉 k_proj/v_proj 裸指针
+
+### 本轮动作
+- 直接在 `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp` 内重构 `score/value` 两个 child-top 的层级边界：
+  1. `prefill_attention_context_score_stream_stage_fp(...)` 不再接收 `k_proj`
+  2. `prefill_attention_context_value_stream_stage_fp(...)` 不再接收 `k_proj/v_proj`
+  3. 两个 child-top 的对外接口都收敛为 `ac_channel + scalar/config`
+- 同时把原先落在 child-top 内部的 `K/V cache` 指针读取上提到 wrapper / primary-top 一侧：
+  1. 新增 `stream_context_score_stage_inputs(...)`，按 query/head-group/key-tile 的真实消费顺序，把 `k_proj` 预读成 `K word stream`
+  2. 新增 `stream_context_value_stage_inputs(...)`，把 `k_proj/v_proj` 预读成 `K word stream + V word stream`
+  3. child-top 内部改为通过 `read_context_k_token_packet_words(...)` / `read_context_v_token_packet_words(...)` 从 channel 取数，而不是在综合边界上直接持有 memory pointer
+- 保持数组/内存只停留在 wrapper 或 `qwen_prefill_attention_context_query_tile_stream_catapult(...)` 这一侧，符合前一轮文档审计得到的方向。
+
+### 结果上发生的实质变化
+- 这次不是简单地“把签名改薄”而已，而是把 `score/value` 的 key 遍历数据源改成了显式 producer-consumer：
+  1. wrapper/top 负责按 child-top 的真实遍历顺序复制 query/meta/score word stream，并生成 `K/V` 输入流
+  2. child-top 只保留 `query/meta/score/result` 与 `K/V word stream` 的消费逻辑
+  3. 因而 `k_proj/v_proj` 不再跨越 `score/value child-top` 的综合边界
+- 这使得当前 bottom-up flow 中最关键的两个 child-top，终于从“channel + raw memory pointer 混合边界”变成了“channel-only 边界”。
+
+### 本轮快速验证
+- 使用：`QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context`
+- 结果：
+  1. `prefill_attention_context_score_stream_stage_fp.v1` 的 `analyze` 正常完成，日志记录为 `3.87s / 1336356kB peak`
+  2. 随后正常进入 `compile`
+  3. `29.98s` 时 score child compile 内存约为 `6575520kB`
+  4. 日志中已明确出现 `Inlining routine '<unnamed>::read_context_k_token_packet_words'`，说明 score child 当前消费的是 `K word channel`，而不是原来的 `k_proj` memory pointer
+- 也就是说，这次边界重构已经被 Catapult 实际接受，不是停留在代码层的表面改动。
+
+### 当前结论
+- 这轮已经完成此前文档审计要求的关键一步：
+  1. `score/value child-top` 不再把 `k_proj/v_proj` 暴露在函数边界上
+  2. child-top 的接口已收敛到 `ac_channel + scalar/config`
+- 但 compile 压力并没有因此立刻消失：
+  1. score child 仍在 `compile` 早期迅速爬到约 `6.6GB`
+  2. 说明当前主要矛盾已进一步收敛到 `score child` 自身内部计算图，而不再是“边界上仍挂着 memory pointer”这个旧问题
+- 因此后续主线应切到：
+  1. 继续观察 `score/value child` 在 channel-only 边界下的长期 compile 曲线
+  2. 若平台仍高，再进一步拆解 child 内部的 `dot_product / score packet / exp-softmax` 路径，而不是回退到边界问题上反复试错
+
+## 2026-03-18 文档回看与 warning 审计：当前核心问题不是“channel 数量不够”，而是层级边界建模错位
+
+### 本地官方文档确认到的两条关键规则
+- `Mgc_home/shared/pdfdocs/js/ccsDoc.json` 中关于 `ac_channel` shared memory 的限制明确写到：
+  1. `C-style arrays mapped to memories are only supported for primary inputs/outputs`
+  2. `Merging of C-style arrays onto a shared resource is not supported between blocks`
+- 同一份文档的 datatype/interface 章节还明确写到：
+  1. `Catapult doesn't have any frame of reference to reduce most variables declared on the top-level function interface`
+  2. `For consistency, the number of bits on a port variable is never changed`
+
+### 对照当前 context flow 的实际状态
+- 当前 Tcl 流里，真正被设为 top 的共有三个边界：
+  1. `prefill_attention_context_score_stream_stage_fp`
+  2. `prefill_attention_context_value_stream_stage_fp`
+  3. `qwen_prefill_attention_context_query_tile_stream_catapult`
+- 这三个边界并没有全部收敛为 `ac_channel + 窄标量`：
+  1. `prefill_attention_context_score_stream_stage_fp(...)` 仍带 `const catapult_fp_t* k_proj`
+  2. `prefill_attention_context_value_stream_stage_fp(...)` 仍带 `const catapult_fp_t* k_proj` 和 `const catapult_fp_t* v_proj`
+  3. `qwen_prefill_attention_context_query_tile_stream_catapult(...)` 仍带 `const catapult_fp_t* k_cache` 和 `const catapult_fp_t* v_cache`
+- 也就是说，目前只把 `query/context` 载荷做了 channel 化，但 `K/V cache` 仍以裸数组/指针的形式穿过 top/child-top 边界。
+- 从官方规则看，这种“分块层级之间仍以 C-style memory array 相连”的建模，本身就不符合其推荐的 shared-memory / hierarchical-block 风格；这比“有没有继续多加几个 channel wrapper”更接近当前 compile 图失控的根因。
+
+### 对 warning 的重新分层
+- 已确认不是主问题、但应先清理的 warning：
+  1. Tcl 重复 include 路径导致的 `#1819-D`，本轮已通过收窄 `SearchPath/CompilerFlags` 去掉。
+  2. 若干仓库文件缺结尾换行导致的 `CRD-1`，大部分已消除；目前只剩 `hls/catapult_shims/limits.h` 和 `hls/catapult_shims/cmath.h` 两处残留，属于日志卫生问题。
+- 不是当前主攻方向的 warning：
+  1. `ac_fixed.h` / `ac_std_float.h` 大量 `CRD-68`、`CRD-111`。
+  2. 这些来自算法库模板实例化和类型转换链，量很大，但现阶段更像 compile 噪声放大器，不是层级边界错误本身。
+- 需要保留关注、但不是“前端头文件问题”的 warning：
+  1. `CIN-393 Original user directive 'block' overridden by 'top' directive`
+  2. 这说明 Tcl 正在显式把 `ccore` helper 提升为 solution top；这是当前 bottom-up 流程的一部分，不是偶发错误。
+
+### 当前主线判断
+- 现在真正要解决的，不是继续盲目做“局部表达式瘦身”实验，而是先把 memory-bearing 边界重新建模：
+  1. 让数组/内存只停留在 primary top 或 wrapper 一侧。
+  2. score/value child-top 不再直接接 `k_proj/v_proj` 裸指针。
+  3. top 与 child-top 之间改成显式 `ac_channel` 传输的 `K-only` / `KV` word-stream 或 tile-stream。
+- 如果这一点不先做，Catapult 仍会在层级边界上同时处理“channel 网络 + 不可缩减的 memory pointer port”，compile 图很容易继续膨胀，之前出现的 `CIN-84 Unable to reduce array size for variable 'k_proj.d'` 也与这个方向一致。
+
+### 后续动作收敛
+- 下一轮不再先碰 `dot_product_128_fp`、`reduce_sum_128_fp` 这类局部算子。
+- 优先按以下顺序推进：
+  1. 先把 `score/value` child-top 的 `k_proj/v_proj` 指针接口移出层级边界。
+  2. 只保留 `ac_channel + scalar/config` 作为 child-top 对外接口。
+  3. 再观察 `compile` 是否仍然在 score child 上维持同样的内联膨胀和 `k_proj.d` 相关建模压力。
+- 结论是：Catapult 没有单独的“function no-inline pragma”；较接近的官方机制只有两类：
+  1. `directive set -STAGEWISE_ENABLE ccore`
+  2. 在子 `ccore` 调用点使用 `-CCORE_FLOW both`
+- 按文档先后做了两轮 Tcl 试验：
+  1. 打开 `-CCORE_INOUT_MODE split_io_port` + `-STAGEWISE_ENABLE ccore`
+  2. 再对子 stage 调用点增加 `-CCORE_FLOW both`
+- 两轮结果一致：
+  1. 指令都被 Catapult 接受
+  2. `analyze` 仍稳定通过
+  3. `compile` 仍正常进入
+  4. 但 `CIN-14 Inlining routine` 依旧存在，`qwen_prefill_attention_context_query_tile_stream_catapult` 和 `prefill_attention_context_score_stream_stage_fp` 仍被 inline
+  5. compile 内存仍在约 `14.37GB` 处回到同一平台
+- 当前判断：
+  1. 轻量 Tcl 开关不足以保住当前 score/value stage 边界
+  2. 若要继续验证“是否能真正保边界”，必须转入 `mpccore` 风格的更强方案：bottom-up / unified CCORE flow
+  3. 即先把 `score/value` 单独建成 CCORE library，再在 top flow 中用 `-MAP_TO_MODULE {[CCORE] ...}` 或全局 `-CCORE_FLOW bottomup` 绑定，而不是继续在单 solution 中做小范围 pragma/Tcl 微调
+
+### 2026-03-18 bottom-up CCORE flow 首次跑通到 child compile
+- 本轮先把 `script/run_catapult_prefill_attention_context.tcl` 改成真正的多 solution bottom-up 结构：
+  1. `prefill_attention_context_score_stream_stage_fp` 先单独建 child solution
+  2. `prefill_attention_context_value_stream_stage_fp` 计划作为第二个 child solution
+  3. 顶层 `qwen_prefill_attention_context_query_tile_stream_catapult` 作为 top solution，后续再绑定 child CCORE library
+- 最初的 blocker 不是 compile，而是 child solution 的 `go analyze`：
+  1. Catapult 2026.1 在这个多 solution 流里直接拒绝 `-include limits.h` / `-include climits`
+  2. 报错为 `go analyze: invalid compiler flag "-include"`
+- 这一步之后按仓库已有 `docs/catapult_limits_header_fix.md` 的结论回退到“本地化头链 + 显式 `.h` shim”路线，做了两类修复：
+  1. Tcl 侧：去掉 `-include limits.h`、`-include climits` 以及 `_GCC_LIMITS_H_` / `_LIBC_LIMITS_H_` 这类绕路宏；同时把 `design_files` 缩到真正的 translation unit，只保留 `qwen_prefill_attention_context_stage_catapult.cpp`
+  2. 头文件侧：把无扩展名 shim（`cmath` / `climits` / `cstddef` / `cstdint` / `cstring` / `iostream` / `ostream` / `string`）统一收口到对应 `.h` shim；补齐 `hls/catapult_shims/cmath.h` 中被 EDG/libstdc++ 与 `ac_*` 头实际用到的数学符号；并把 `ac_int.h` / `ac_fixed.h` 中少数裸 `floor` / `frexp` 调用显式改成 `std::` 版本
+- 修完后，bottom-up child score solution 已经首次越过 `analyze` 并进入 `compile`：
+  1. `analyze` 完成记录为 `4.14s / 1336356kB peak`
+  2. `compile` 在 30s 左右达到 `6706592kB`，后续平台约 `7103524kB`
+  3. 180s 守卫窗口内未见新的前端 `Error:`，说明当前阻塞已经从头文件解析阶段前移到真正的 child compile
+- 当前观测到的 compile 形态：
+  1. 这次日志里出现了 `Synthesizing routine '<unnamed>::prefill_attention_context_score_stream_stage_fp'`
+  2. 说明 child score stage 已经被当作独立 top 在编译，而不是还卡死在入口分析
+  3. 但 child compile 内部仍然存在大量 `Inlining routine ...`，即 score child 自身内部 helper 仍被内联，这一步是合理现象；真正需要继续验证的是：后续 top solution 绑定 child CCORE library 后，top compile 是否还能避免把 score/value stage 再次整体 inline 回去
+- 当前结论：
+  1. 这轮修改已经把 bottom-up 流从“根本跑不起来”推进到“child score CCORE 可以独立 analyze + compile”
+  2. 仅看 child score compile，内存平台约 `7.1GB`，明显低于此前单体 context top 快速验证时约 `14.37GB` 的平台值
+  3. 下一步不应再回头折腾头文件或轻量 pragma，而应继续把 `score` child 跑完 `extract`，再验证 `value` child 与 top-level `[CCORE]` 绑定是否能真正保住 stage 边界
+
+### 2026-03-18 long-run 复核：score child compile 不是 7.1GB 平台，而是延后爬升到约 19GB
+- 对同一条 bottom-up flow 做更长时间观察后，先前 `180s` 窗口得到的“约 `7.1GB` 平台”结论需要修正：那只是 child score compile 的早期平台，不是最终平台。
+- 从 `work/tmp/catapult_prefill_attention_context_monitor.log` 可见，`prefill_attention_context_score_stream_stage_fp` 在通过早期 `7.1GB` 平台后继续单调爬升：
+  1. `18:07:36 -> 10380324kB`
+  2. `18:08:33 -> 12411940kB`
+  3. `18:09:36 -> 14378020kB`
+  4. `18:10:33 -> 16475172kB`
+  5. `18:11:35 -> 18572324kB`
+  6. `18:16:06 -> 18965540kB`
+- 同期 Catapult 日志仍停留在同一个 child solution 的 `compile`：
+  1. `751.07s -> 18834468kB`
+  2. `841.06s -> 18965540kB`
+  3. `1231.04s -> 18965540kB`
+  4. `1261.04s -> 18965540kB`
+- 在这段长跑里没有出现新的前端 `Error:`，但也没有看到：
+  1. `Completed transformation 'compile'`
+  2. `go assembly`
+  3. `go architect`
+  4. `go extract`
+  5. 切换到 `prefill_attention_context_value_stream_stage_fp`
+- 结合日志尾部仍在持续刷新的 `Inlining routine ...`，当前更准确的判断是：
+  1. bottom-up flow 已经成功把问题从“入口分析/头文件解析失败”推进到“score child 自身 compile 图过厚”
+  2. 但它并没有把 compile 内存真正压在 `7GB` 量级，而是把大内存阶段推迟了几分钟后重新拉高到约 `19GB`
+  3. 当前瓶颈已明确收敛到 `prefill_attention_context_score_stream_stage_fp` 自身，而不是 top-level 绑定或 value child
+- 因此后续主线应调整为：优先继续削减 score child 内部 compile 图，而不是继续等待 top-level `[CCORE]` 绑定验证。尤其需要针对当前日志中最密集的内联热点继续收敛：
+  1. `ac_std_float<32, 8>` 构造/`set_data`/`data_ac_int`
+  2. `ccs_dw_fp_lib.h` 下的 `fp_mult` / `ccs_fp_mult`
+  3. `dot_product_128_fp` 与 `compute_context_score_packet` 一带的 helper 展开
+
 ## 2026-03-18 方案 A 继续推进：score/value stage 深拆但未改变 compile 平台期
 
 ### 本轮动作
@@ -529,3 +691,58 @@
   2. `~77s` 从约 `12.15GB` 回到约 `11.88GB`
   3. `~106s` 又上升到约 `14.50GB`
 - 当前判断：仅把 query 输入视角从 full-sequence 数组收窄到 tile-core 还不够，compile 图的主要厚度仍在 `score/value` 内部以及 `head-group` 级 orchestration；后续若继续沿方案 A 推进，应进一步把 `score core` / `value core` 提升成更明确的 stage top，而不只是外层 tile wrapper。
+
+## 2026-03-20 full-context 正式验证：结构问题已清空，当前阻塞收敛到 value-stage 调度反馈环
+
+### 本轮目标
+- 用户要求从现有 `score-only` 路径升级到完整 `context` top 的正式 Catapult 验证，再在此基础上继续推进 full prefill top。
+- 本轮实际验证入口仍通过环境变量覆盖，不直接修改默认 Tcl top：
+  1. `QWEN_CONTEXT_TOP_FUNCTION=qwen_prefill_attention_context_query_tile_stream_catapult`
+  2. `QWEN_CONTEXT_SOLUTION_NAME=prefill_attention_context_query_tile_stream_catapult`
+
+### 本轮已完成收敛
+- `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp` 内，full-context 路径已经从结构性失败推进到真正的调度问题：
+  1. 清掉了 channel-based child stage 上不合法的 `ccore` 用法。
+  2. 为需要保留层级的 helper/stage 显式补齐 `block` 边界。
+  3. 去掉了导致 `HIER-6` 的非静态局部 `ac_channel`，改成跨层级可接受的 `static ac_channel`。
+  4. 清理了 `seq_len`、`query_count`、`tile_config.query_heads_parallel` 一带的 `MEM-94` / `MEM-71` 资源映射问题。
+  5. 将 full-context 形式化路径专门收敛到当前综合默认的 `query_heads_parallel=2` 头组规模，避免顶层继续背负不必要的控制扇出。
+
+### 当前正式验证进度
+- 最新 full-context 运行已经稳定越过以下阶段：
+  1. `compile`
+  2. `libraries`
+  3. `assembly`
+  4. `memories`
+  5. `cluster`
+  6. `architect`
+  7. 并进入 `allocate`
+- 对应日志：`work/tmp/catapult_formal_attention_context_full_20260320.log`
+- 最新一轮代表性指标：
+  1. `memories` 完成时：`Total ops = 31043, Real ops = 736, Vars = 4274`
+  2. `architect` 完成时：`Total ops = 33997, Real ops = 1510, Vars = 5037`
+  3. 峰值内存约 `2249688kB`
+
+### 本轮为调度收敛做的最小代码动作
+- 针对 value-stage 反馈环，做了两项已经验证有效但尚不足以闭合调度的收敛动作：
+  1. 将 `ATTN_CONTEXT_VALUE_TILE_LOOP` 的 `#pragma hls_pipeline_init_interval` 从 `2` 放宽到 `4`。
+  2. 将 `ContextValueHeadStatePacket` 从“按全部 attention heads 分配”收窄为“只按当前综合头组大小 `kContextHeadGroupSize` 分配”，以减少 `denom/accum` 状态体积和对应 RAM 压力。
+
+### 当前唯一主阻塞
+- full-context 现在不再卡在 hierarchy 或 memory mapping，而是卡在 `allocate` 阶段的真实调度反馈环：
+  1. `SCHD-3`
+  2. `SCHD-20`
+- 当前失败分区为：
+  1. `/<unnamed>::qwen_prefill_attention_context_query_tile_stream_catapult/<unnamed>::prefill_attention_context_value_stream_stage_fp/core`
+- 日志显示的关键路径已经收敛到同一条反馈链：
+  1. `head_state_packet.accum` RAM read
+  2. `ccs_dw_fp_mac<23,8,0>()`
+  3. 写回同一 `head_state_packet.accum` RAM
+- 最新 trace 中该资源已收敛为较小的 `256 x 32` RAM，说明状态体积压缩已经生效；但 recurrence 仍未被打断。
+
+### 当前结论
+- 到这一轮为止，full-context top 的结构性门槛已经基本清空，问题已成功收敛为一个局部、可定位的 value-stage 调度反馈环。
+- 因为还没有越过 `allocate -> extract`，所以当前不应：
+  1. 直接把 `script/run_catapult_prefill_attention_context.tcl` 的默认 top 从 `score-only` 切到 full-context。
+  2. 提前启动 full prefill top 的 RTL 生成。
+- 下一步应继续围绕 `head_state_packet.accum` 的存储/访问形态做根因修复，优先目标是打断 `RAM read -> DW FP MAC -> RAM write` 的 recurrence，而不是再做同类外层结构改造。

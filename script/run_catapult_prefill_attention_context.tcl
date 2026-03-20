@@ -117,6 +117,24 @@ proc source_saed_setup {mgc_home} {
 	source $saed_setup_tcl
 }
 
+proc configure_saed_techlib_search_path {} {
+	if {[info exists ::env(SAED32_EDK)] && [file isdirectory $::env(SAED32_EDK)]} {
+		foreach path [list \
+			[file join $::env(SAED32_EDK) tech] \
+			[file join $::env(SAED32_EDK) lib SG db] \
+			[file join $::env(SAED32_EDK) lib SG] \
+			[file join $::env(SAED32_EDK) tech milkyway] \
+			[file join $::env(SAED32_EDK) lib stdcell_rvt milkyway] \
+			[file join $::env(SAED32_EDK) lib stdcell_hvt milkyway] \
+			[file join $::env(SAED32_EDK) lib stdcell_lvt milkyway] \
+			[file join $::env(SAED32_EDK) tech star_rcxt]] {
+			if {[file exists $path]} {
+				options set ComponentLibs/TechLibSearchPath $path -append
+			}
+		}
+	}
+}
+
 cd $script_dir
 
 options defaults
@@ -134,6 +152,7 @@ solution design set $top_function -top
 directive set -CLOCK_OVERHEAD 0
 directive set -OPT_CONST_MULTS -1
 go compile
+configure_saed_techlib_search_path
 add_common_libraries
 go libraries
 source_saed_setup $mgc_home
