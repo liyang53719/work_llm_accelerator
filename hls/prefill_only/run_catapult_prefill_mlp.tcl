@@ -1,13 +1,24 @@
 set script_dir [file dirname [file normalize [info script]]]
 set project_root [file dirname $script_dir]
-set mgc_home /home/yang/tools/Siemens_EDA/Catapult_Synthesis_2022.2-1008433/Mgc_home
-set gcc_root $mgc_home/pkgs/dcs_gcc/gcc-10.3.0
+set mgc_home ""
+set gcc_root ""
+set gcc_version ""
 set solution_name qwen_prefill_mlp_kernel_solution
 set top_function qwen_prefill_mlp_kernel
 set clock_period 1.0
 set enable_fp_operator_mapping 0
 set use_legacy_dw_lib 0
-set add_ccs_designware 0
+
+if {[info exists ::env(MGC_HOME)] && $::env(MGC_HOME) ne ""} {
+	set mgc_home $::env(MGC_HOME)
+} else {
+	set mgc_home [file dirname [file dirname [file normalize [info nameofexecutable]]]]
+}
+
+set gcc_root [lindex [glob -nocomplain -directory [file join $mgc_home pkgs dcs_gcc] gcc-*] 0]
+if {$gcc_root ne ""} {
+	set gcc_version [string range [file tail $gcc_root] 4 end]
+}
 
 if {[info exists ::env(QWEN_HLS_CLOCK_PERIOD)] && $::env(QWEN_HLS_CLOCK_PERIOD) ne ""} {
 	set clock_period $::env(QWEN_HLS_CLOCK_PERIOD)
@@ -22,15 +33,8 @@ if {[info exists ::env(QWEN_HLS_USE_LEGACY_DW_LIB)] && $::env(QWEN_HLS_USE_LEGAC
 	set enable_fp_operator_mapping 1
 }
 
-if {[info exists ::env(QWEN_HLS_ADD_CCS_DESIGNWARE)] && $::env(QWEN_HLS_ADD_CCS_DESIGNWARE) ne "0"} {
-	set add_ccs_designware 1
-}
-
 set design_files [list \
-	[file join $script_dir qwen_prefill_mlp_kernel.cpp] \
-	[file join $script_dir qwen_prefill_mlp_kernel.h] \
-	[file join $project_root common llm_accel_types.h] \
-	[file join $project_root common qwen2_model_config.h]]
+	[file join $script_dir qwen_prefill_mlp_kernel.cpp]]
 
 foreach design_file $design_files {
 	if {![file exists $design_file]} {
@@ -48,27 +52,26 @@ set search_path [join [list \
 	[file join $project_root catapult_shims] \
 	$project_root \
 	$mgc_home/shared/include \
-	[file join $gcc_root include c++ 10.3.0] \
-	[file join $gcc_root include c++ 10.3.0 x86_64-linux-gnu] \
-	[file join $gcc_root lib gcc x86_64-linux-gnu 10.3.0 include] \
+	[file join $gcc_root include c++ $gcc_version] \
+	[file join $gcc_root include c++ $gcc_version x86_64-linux-gnu] \
+	[file join $gcc_root include c++ $gcc_version backward] \
+	[file join $gcc_root lib gcc x86_64-linux-gnu $gcc_version include] \
 	/usr/include \
 	/usr/include/x86_64-linux-gnu] " "]
 
 set compiler_flags [list \
+	-DHLS_CATAPULT \
 	"-I$script_dir" \
 	"-I[file join $project_root common]" \
 	"-I[file join $project_root include]" \
 	"-I[file join $project_root catapult_shims]" \
 	"-I$project_root" \
 	"-I$mgc_home/shared/include" \
-	"-include limits.h" \
-	"-include climits" \
-	"-D_GCC_LIMITS_H_" \
-	"-D_LIBC_LIMITS_H_" \
 	"-D__EDG__" \
-	"-I[file join $gcc_root include c++ 10.3.0]" \
-	"-I[file join $gcc_root include c++ 10.3.0 x86_64-linux-gnu]" \
-	"-I[file join $gcc_root lib gcc x86_64-linux-gnu 10.3.0 include]" \
+	"-I[file join $gcc_root include c++ $gcc_version]" \
+	"-I[file join $gcc_root include c++ $gcc_version x86_64-linux-gnu]" \
+	"-I[file join $gcc_root include c++ $gcc_version backward]" \
+	"-I[file join $gcc_root lib gcc x86_64-linux-gnu $gcc_version include]" \
 	"-I/usr/include" \
 	"-I/usr/include/x86_64-linux-gnu"]
 
@@ -97,16 +100,25 @@ proc emit_general_solution_metrics {} {
 	}
 }
 
+proc source_saed_setup {mgc_home} {
+	set saed_setup_tcl [file join $mgc_home pkgs siflibs saed setup_saedlib.tcl]
+	if {![file exists $saed_setup_tcl]} {
+		error "Required SAED setup script not found: $saed_setup_tcl"
+	}
+	source $saed_setup_tcl
+}
+
 cd $script_dir
 
 options defaults
+project new
+flow package require /SCVerify
+flow package require /DesignCompiler
 solution new $solution_name
 solution options set /Input/SearchPath $search_path
 solution options set /Input/CompilerFlags [join $compiler_flags " "]
-solution options set /Input/CppStandard c++14
+solution options set /Input/CppStandard c++11
 solution options set /Flows/SCVerify/USE_CCS_BLOCK true
-
-project new
 foreach design_file $design_files {
 	solution file add $design_file
 }
@@ -116,13 +128,11 @@ go analyze
 solution design set $top_function -top
 go compile
 
-solution library add nangate-45nm_beh -- -rtlsyntool OasysRTL
+solution library add saed32rvt_tt0p78v125c_dw_beh -- -rtlsyntool DesignCompiler -vendor SAED32 -technology {rvt tt0p78v125c}
 solution library add ccs_sample_mem
-if {$add_ccs_designware} {
-	puts "QWEN_NOTE skipping ccs_designware: current flow uses OasysRTL base libraries; official ccs_designware support requires a compatible DesignCompiler-backed library configuration"
-}
 
 go libraries
+source_saed_setup $mgc_home
 directive set -CLOCKS [list clk [list -CLOCK_PERIOD $clock_period]]
 directive set /$top_function/core -MEM_MAP_THRESHOLD 129
 directive set SCHED_USE_MULTICYCLE true

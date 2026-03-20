@@ -1,10 +1,10 @@
 #include "qwen_prefill_attention_kernel.h"
-#include "../include/ac_channel.h"
+#include <ac_channel.h>
 
 #ifdef __SYNTHESIS__
-#include "../include/ac_int.h"
-#include "../include/ac_std_float.h"
-#include "../include/ccs_dw_fp_lib.h"
+#include <ac_int.h>
+#include <ac_std_float.h>
+#include <ccs_dw_fp_lib.h>
 #endif
 
 namespace {
@@ -32,9 +32,21 @@ constexpr int kContextTokenWordCount = llm_accel::kHiddenSize / kMaxFpWordsPerBe
 constexpr int kContextScoreWordCount =
   (llm_accel::kNumAttentionHeads + kMaxFpWordsPerBeat - 1) / kMaxFpWordsPerBeat;
 constexpr int kContextKvWordCount = kKvWidth / kMaxFpWordsPerBeat;
+constexpr int kHeadWordCount = llm_accel::kHeadDim / kMaxFpWordsPerBeat;
+constexpr int kScoreExportHeadGroupCount =
+  llm_accel::kNumAttentionHeads / llm_accel::kDefaultPrefillAttentionQueryHeadsParallel;
+constexpr int kScoreExportKeyTileCount =
+  llm_accel::kDefaultPrefillSeqTile / llm_accel::kDefaultPrefillAttentionKeyTile;
 constexpr int kHiddenProjFpWordCount = kProjectionTileCapacity / kMaxFpWordsPerBeat;
 constexpr int kHiddenProjPackedTileSize = kProjectionTileCapacity * kProjectionTileCapacity / 2;
 constexpr int kHiddenProjPackedWordCount = kHiddenProjPackedTileSize / kMaxPackedWordsPerBeat;
+
+static_assert(
+  llm_accel::kNumAttentionHeads % llm_accel::kDefaultPrefillAttentionQueryHeadsParallel == 0,
+  "Score export top expects even head grouping.");
+static_assert(
+  llm_accel::kDefaultPrefillSeqTile % llm_accel::kDefaultPrefillAttentionKeyTile == 0,
+  "Score export top expects even key tiling.");
 
 inline int min_int(int lhs, int rhs) {
   return lhs < rhs ? lhs : rhs;
@@ -99,8 +111,8 @@ float decode_int4_weight(llm_accel::packed_w4_t packed_value, bool high_nibble) 
 #ifdef __SYNTHESIS__
 
 using catapult_fp_t = llm_accel::prefill_catapult_fp_t;
+using catapult_fp_bits_t = ac_int<kCatapultFpBitWidth, false>;
 
-constexpr int kFpIeeeCompliance = 0;
 constexpr int kParallelMacLaneCount = llm_accel::kTileN;
 constexpr int kRmsNormChunkCount = llm_accel::kHiddenSize / kParallelMacLaneCount;
 
@@ -187,55 +199,43 @@ inline catapult_fp_t fp_one() {
 }
 
 inline catapult_fp_t fp_add_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_add<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_add(lhs, rhs);
 }
 
 inline catapult_fp_t fp_sub_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_sub<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_sub(lhs, rhs);
 }
 
 inline catapult_fp_t fp_mul_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_mult<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_mul(lhs, rhs);
 }
 
 inline catapult_fp_t fp_div_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_div<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_div(lhs, rhs);
 }
 
 inline catapult_fp_t fp_mac_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs, const catapult_fp_t& acc) {
-  return fp_mac<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs, acc);
+  return llm_accel::prefill_catapult_fp_mac(lhs, rhs, acc);
 }
 
 inline catapult_fp_t fp_sqrt_op(const catapult_fp_t& value) {
-  return fp_sqrt<AC_RND_CONV, kFpIeeeCompliance>(value);
+  return llm_accel::prefill_catapult_fp_sqrt(value);
 }
 
 inline bool fp_eq_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  ac_int<4, false> rel;
-  catapult_fp_t z0;
-  catapult_fp_t z1;
-  fp_cmp<kFpIeeeCompliance>(lhs, rhs, 0, rel, z0, z1);
-  return rel[0] != 0;
+  return llm_accel::prefill_catapult_fp_eq(lhs, rhs);
 }
 
 inline bool fp_lt_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  ac_int<4, false> rel;
-  catapult_fp_t z0;
-  catapult_fp_t z1;
-  fp_cmp<kFpIeeeCompliance>(lhs, rhs, 0, rel, z0, z1);
-  return rel[1] != 0;
+  return llm_accel::prefill_catapult_fp_lt(lhs, rhs);
 }
 
 inline bool fp_gt_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  ac_int<4, false> rel;
-  catapult_fp_t z0;
-  catapult_fp_t z1;
-  fp_cmp<kFpIeeeCompliance>(lhs, rhs, 0, rel, z0, z1);
-  return rel[2] != 0;
+  return llm_accel::prefill_catapult_fp_gt(lhs, rhs);
 }
 
 inline bool fp_le_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_lt_op(lhs, rhs) || fp_eq_op(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_le(lhs, rhs);
 }
 
 catapult_fp_t approx_exp_fp(const catapult_fp_t& value) {
@@ -612,6 +612,10 @@ struct ContextScorePacket {
 
 struct ContextFpWordPacket {
   catapult_fp_t data[kMaxFpWordsPerBeat];
+};
+
+struct ContextFpBitsWordPacket {
+  catapult_fp_bits_t data[kMaxFpWordsPerBeat];
 };
 
 struct ContextValueHeadStatePacket {
@@ -1438,9 +1442,7 @@ void stream_context_value_stage_inputs(
   }
 }
 
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-void prefill_attention_context_score_stream_stage_fp(
+void prefill_attention_context_score_stream_stage_fp_core(
     int seq_len,
     int query_count,
     const llm_accel::PrefillAttentionTileConfig& tile_config,
@@ -1450,23 +1452,247 @@ void prefill_attention_context_score_stream_stage_fp(
     ac_channel<ContextQueryMetaPacket>& score_meta_chan,
     ac_channel<ContextFpWordPacket>& score_query_word_chan,
     ac_channel<ContextFpWordPacket>& max_score_word_chan) {
+  const int key_tile = max_int(1, tile_config.key);
+  const int query_heads_parallel = max_int(1, tile_config.query_heads_parallel);
+  const catapult_fp_t attention_scaling = fp_const(kAttentionScaling);
+
   for (int query_slot = 0; query_slot < query_count; ++query_slot) {
     const ContextQueryMetaPacket meta_packet = query_meta_chan.read();
-    ContextQueryPacket query_packet;
+    ContextFpWordPacket query_word_buffer[kContextTokenWordCount];
     ContextScorePacket max_score_packet;
 
-    read_context_query_packet_words(query_word_chan, query_packet);
-    prefill_attention_context_query_max_score_fp(
-        query_packet,
-        seq_len,
-        meta_packet.query_index,
-        tile_config,
-      key_word_chan,
-        max_score_packet);
+    for (int word_index = 0; word_index < kContextTokenWordCount; ++word_index) {
+      const ContextFpWordPacket word_packet = query_word_chan.read();
+
+      query_word_buffer[word_index] = word_packet;
+      score_query_word_chan.write(word_packet);
+    }
+
+#pragma hls_unroll yes
+    for (int head = 0; head < llm_accel::kNumAttentionHeads; ++head) {
+      max_score_packet.data[head] = fp_const(-1.0e30f);
+    }
+
+    const int query_limit = min_int(seq_len, meta_packet.query_index + 1);
+    for (int head_base = 0; head_base < llm_accel::kNumAttentionHeads; head_base += query_heads_parallel) {
+      const int head_end = min_int(llm_accel::kNumAttentionHeads, head_base + query_heads_parallel);
+      for (int key_begin = 0; key_begin < query_limit; key_begin += key_tile) {
+        const int key_end = min_int(query_limit, key_begin + key_tile);
+ATTN_CONTEXT_SCORE_KEY_LOOP:
+        for (int key_index = key_begin; key_index < key_end; ++key_index) {
+          (void)key_index;
+          catapult_fp_t partial_score[llm_accel::kNumAttentionHeads];
+
+#pragma hls_unroll yes
+          for (int head_offset = 0; head_offset < llm_accel::kNumAttentionHeads; ++head_offset) {
+            partial_score[head_offset] = fp_zero();
+          }
+
+          for (int word_index = 0; word_index < kContextKvWordCount; ++word_index) {
+            const ContextFpWordPacket word_packet = key_word_chan.read();
+            const int kv_head = word_index / kHeadWordCount;
+            const int head_word_offset = word_index % kHeadWordCount;
+
+            for (int head = head_base; head < head_end; ++head) {
+              if (head / kNumGroups == kv_head) {
+                const ContextFpWordPacket query_word_packet =
+                    query_word_buffer[head * kHeadWordCount + head_word_offset];
+                catapult_fp_t word_sum = fp_zero();
+
+#pragma hls_unroll yes
+                for (int lane = 0; lane < kMaxFpWordsPerBeat; ++lane) {
+                  const catapult_fp_t q_value = query_word_packet.data[lane];
+                  word_sum = fp_mac_op(q_value, word_packet.data[lane], word_sum);
+                }
+                partial_score[head] = fp_add_op(partial_score[head], word_sum);
+              }
+            }
+          }
+
+#pragma hls_unroll yes
+          for (int head = head_base; head < head_end; ++head) {
+            const catapult_fp_t score = fp_mul_op(partial_score[head], attention_scaling);
+            if (fp_gt_op(score, max_score_packet.data[head])) {
+              max_score_packet.data[head] = score;
+            }
+          }
+        }
+      }
+    }
+
     score_meta_chan.write(meta_packet);
-    stream_context_query_packet_words(query_packet, score_query_word_chan);
-    stream_context_score_packet_words(max_score_packet, max_score_word_chan);
+    for (int word_index = 0; word_index < kContextScoreWordCount; ++word_index) {
+      ContextFpWordPacket word_packet;
+
+#pragma hls_unroll yes
+      for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+        const int head_index = word_index * kMaxFpWordsPerBeat + index;
+        word_packet.data[index] = head_index < llm_accel::kNumAttentionHeads ? max_score_packet.data[head_index] : fp_zero();
+      }
+
+      max_score_word_chan.write(word_packet);
+    }
   }
+}
+
+#pragma hls_design top
+void prefill_attention_context_score_stream_top_catapult(
+    int seq_len,
+    int query_count,
+    const llm_accel::PrefillAttentionTileConfig& tile_config,
+    ac_channel<ContextQueryMetaPacket>& query_meta_chan,
+    ac_channel<ContextFpWordPacket>& query_word_chan,
+    ac_channel<ContextFpWordPacket>& key_word_chan,
+    ac_channel<ContextQueryMetaPacket>& score_meta_chan,
+    ac_channel<ContextFpWordPacket>& score_query_word_chan,
+    ac_channel<ContextFpWordPacket>& max_score_word_chan) {
+  prefill_attention_context_score_stream_stage_fp_core(
+      seq_len,
+      query_count,
+      tile_config,
+      query_meta_chan,
+      query_word_chan,
+      key_word_chan,
+      score_meta_chan,
+      score_query_word_chan,
+      max_score_word_chan);
+}
+
+void prefill_attention_context_score_stream_rtl_export_top_core(
+    ac_channel<ContextQueryMetaPacket>& query_meta_chan,
+    ac_channel<ContextFpWordPacket>& query_word_chan,
+    ac_channel<ContextFpWordPacket>& key_word_chan,
+    ac_channel<ContextQueryMetaPacket>& score_meta_chan,
+    ac_channel<ContextFpWordPacket>& score_query_word_chan,
+    ac_channel<ContextFpWordPacket>& max_score_word_chan) {
+  const ContextQueryMetaPacket meta_packet = query_meta_chan.read();
+  ContextFpBitsWordPacket query_word_buffer[kContextTokenWordCount];
+  ContextFpBitsWordPacket key_word_buffer[kContextKvWordCount];
+  catapult_fp_t max_score_buffer[llm_accel::kNumAttentionHeads];
+  const catapult_fp_t attention_scaling = fp_const(kAttentionScaling);
+
+  for (int word_index = 0; word_index < kContextTokenWordCount; ++word_index) {
+    const ContextFpWordPacket word_packet = query_word_chan.read();
+
+#pragma hls_unroll yes
+    for (int lane = 0; lane < kMaxFpWordsPerBeat; ++lane) {
+      query_word_buffer[word_index].data[lane] = word_packet.data[lane].data_ac_int();
+    }
+    score_query_word_chan.write(word_packet);
+  }
+
+#pragma hls_unroll yes
+  for (int head = 0; head < llm_accel::kNumAttentionHeads; ++head) {
+    max_score_buffer[head] = fp_const(-1.0e30f);
+  }
+
+  for (int head_group = 0; head_group < kScoreExportHeadGroupCount; ++head_group) {
+    const int head_base = head_group * llm_accel::kDefaultPrefillAttentionQueryHeadsParallel;
+    for (int key_tile = 0; key_tile < kScoreExportKeyTileCount; ++key_tile) {
+      const int key_begin = key_tile * llm_accel::kDefaultPrefillAttentionKeyTile;
+ATTN_CONTEXT_SCORE_EXPORT_KEY_LOOP:
+      for (int key_offset = 0; key_offset < llm_accel::kDefaultPrefillAttentionKeyTile; ++key_offset) {
+        const int key_index = key_begin + key_offset;
+        (void)key_index;
+        for (int word_index = 0; word_index < kContextKvWordCount; ++word_index) {
+          const ContextFpWordPacket word_packet = key_word_chan.read();
+
+#pragma hls_unroll yes
+          for (int lane = 0; lane < kMaxFpWordsPerBeat; ++lane) {
+            key_word_buffer[word_index].data[lane] = word_packet.data[lane].data_ac_int();
+          }
+        }
+
+        for (int head_offset = 0;
+             head_offset < llm_accel::kDefaultPrefillAttentionQueryHeadsParallel;
+             ++head_offset) {
+          const int head = head_base + head_offset;
+          const int kv_head = head / kNumGroups;
+          const int query_word_base = head * kHeadWordCount;
+          const int key_word_base = kv_head * kHeadWordCount;
+          catapult_fp_t partial_score = fp_zero();
+
+          for (int head_word_offset = 0;
+               head_word_offset < kHeadWordCount;
+               ++head_word_offset) {
+            const ContextFpBitsWordPacket query_word_packet =
+                query_word_buffer[query_word_base + head_word_offset];
+            const ContextFpBitsWordPacket key_word_packet =
+                key_word_buffer[key_word_base + head_word_offset];
+            catapult_fp_t word_sum = fp_zero();
+
+            for (int lane = 0; lane < kMaxFpWordsPerBeat; ++lane) {
+              catapult_fp_t q_value;
+              catapult_fp_t k_value;
+
+              q_value.set_data(query_word_packet.data[lane]);
+              k_value.set_data(key_word_packet.data[lane]);
+              word_sum = fp_mac_op(q_value, k_value, word_sum);
+            }
+            partial_score = fp_add_op(partial_score, word_sum);
+          }
+
+          const catapult_fp_t score = fp_mul_op(partial_score, attention_scaling);
+          if (fp_gt_op(score, max_score_buffer[head])) {
+            max_score_buffer[head] = score;
+          }
+        }
+      }
+    }
+  }
+
+  score_meta_chan.write(meta_packet);
+  for (int word_index = 0; word_index < kContextScoreWordCount; ++word_index) {
+    ContextFpWordPacket word_packet;
+
+    for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+      const int head_index = word_index * kMaxFpWordsPerBeat + index;
+      word_packet.data[index] = head_index < llm_accel::kNumAttentionHeads ? max_score_buffer[head_index] : fp_zero();
+    }
+
+    max_score_word_chan.write(word_packet);
+  }
+}
+
+#pragma hls_design top
+void prefill_attention_context_score_stream_rtl_export_top_catapult(
+    ac_channel<ContextQueryMetaPacket>& query_meta_chan,
+    ac_channel<ContextFpWordPacket>& query_word_chan,
+    ac_channel<ContextFpWordPacket>& key_word_chan,
+    ac_channel<ContextQueryMetaPacket>& score_meta_chan,
+    ac_channel<ContextFpWordPacket>& score_query_word_chan,
+    ac_channel<ContextFpWordPacket>& max_score_word_chan) {
+  prefill_attention_context_score_stream_rtl_export_top_core(
+      query_meta_chan,
+      query_word_chan,
+      key_word_chan,
+      score_meta_chan,
+      score_query_word_chan,
+      max_score_word_chan);
+}
+
+#pragma hls_design ccore
+#pragma hls_ccore_type sequential
+void prefill_attention_context_score_stream_stage_fp(
+    int seq_len,
+    int query_count,
+    const llm_accel::PrefillAttentionTileConfig& tile_config,
+    ac_channel<ContextQueryMetaPacket>& query_meta_chan,
+    ac_channel<ContextFpWordPacket>& query_word_chan,
+    ac_channel<ContextFpWordPacket>& key_word_chan,
+    ac_channel<ContextQueryMetaPacket>& score_meta_chan,
+    ac_channel<ContextFpWordPacket>& score_query_word_chan,
+    ac_channel<ContextFpWordPacket>& max_score_word_chan) {
+  prefill_attention_context_score_stream_stage_fp_core(
+      seq_len,
+      query_count,
+      tile_config,
+      query_meta_chan,
+      query_word_chan,
+      key_word_chan,
+      score_meta_chan,
+      score_query_word_chan,
+      max_score_word_chan);
 }
 
 #pragma hls_design ccore

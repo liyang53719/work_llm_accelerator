@@ -2,6 +2,8 @@ set script_dir [file dirname [file normalize [info script]]]
 set repo_root [file dirname $script_dir]
 set hls_root [file join $repo_root hls]
 set mgc_home ""
+set gcc_root ""
+set gcc_version ""
 
 if {[info exists ::env(MGC_HOME)] && $::env(MGC_HOME) ne ""} {
 	set mgc_home $::env(MGC_HOME)
@@ -9,19 +11,29 @@ if {[info exists ::env(MGC_HOME)] && $::env(MGC_HOME) ne ""} {
 	set mgc_home [file dirname [file dirname [file normalize [info nameofexecutable]]]]
 }
 
-set solution_name qwen_prefill_attention_context_solution
-set top_function qwen_prefill_attention_context_query_tile_stream_catapult
+set gcc_root [lindex [glob -nocomplain -directory [file join $mgc_home pkgs dcs_gcc] gcc-*] 0]
+if {$gcc_root ne ""} {
+	set gcc_version [string range [file tail $gcc_root] 4 end]
+}
+
+set solution_name prefill_attention_context_score_stream_rtl_export_top_catapult
+set top_function prefill_attention_context_score_stream_rtl_export_top_catapult
 set clock_period 2.0
+
+if {[info exists ::env(QWEN_CONTEXT_SOLUTION_NAME)] && $::env(QWEN_CONTEXT_SOLUTION_NAME) ne ""} {
+	set solution_name $::env(QWEN_CONTEXT_SOLUTION_NAME)
+}
+
+if {[info exists ::env(QWEN_CONTEXT_TOP_FUNCTION)] && $::env(QWEN_CONTEXT_TOP_FUNCTION) ne ""} {
+	set top_function $::env(QWEN_CONTEXT_TOP_FUNCTION)
+}
 
 if {[info exists ::env(QWEN_HLS_CLOCK_PERIOD)] && $::env(QWEN_HLS_CLOCK_PERIOD) ne ""} {
 	set clock_period $::env(QWEN_HLS_CLOCK_PERIOD)
 }
 
 set design_files [list \
-	[file join $hls_root prefill_only qwen_prefill_attention_context_stage_catapult.cpp] \
-	[file join $hls_root prefill_only qwen_prefill_attention_kernel.h] \
-	[file join $hls_root common llm_accel_types.h] \
-	[file join $hls_root common qwen2_model_config.h]]
+	[file join $hls_root prefill_only qwen_prefill_attention_context_stage_catapult.cpp]]
 
 foreach design_file $design_files {
 	if {![file exists $design_file]} {
@@ -39,27 +51,26 @@ set search_path [join [list \
 	[file join $hls_root catapult_shims] \
 	$hls_root \
 	[file join $mgc_home shared include] \
-	/usr/include/c++/10 \
-	/usr/include/x86_64-linux-gnu/c++/10 \
-	/usr/lib/gcc/x86_64-linux-gnu/10/include \
+	[file join $gcc_root include c++ $gcc_version] \
+	[file join $gcc_root include c++ $gcc_version x86_64-linux-gnu] \
+	[file join $gcc_root include c++ $gcc_version backward] \
+	[file join $gcc_root lib gcc x86_64-linux-gnu $gcc_version include] \
 	/usr/include \
 	/usr/include/x86_64-linux-gnu] " "]
 
 set compiler_flags [list \
+	-DHLS_CATAPULT \
 	"-I[file join $hls_root prefill_only]" \
 	"-I[file join $hls_root common]" \
 	"-I[file join $hls_root include]" \
 	"-I[file join $hls_root catapult_shims]" \
 	"-I$hls_root" \
 	"-I[file join $mgc_home shared include]" \
-	"-include limits.h" \
-	"-include climits" \
-	"-D_GCC_LIMITS_H_" \
-	"-D_LIBC_LIMITS_H_" \
 	"-D__EDG__" \
-	"-I/usr/include/c++/10" \
-	"-I/usr/include/x86_64-linux-gnu/c++/10" \
-	"-I/usr/lib/gcc/x86_64-linux-gnu/10/include" \
+	"-I[file join $gcc_root include c++ $gcc_version]" \
+	"-I[file join $gcc_root include c++ $gcc_version x86_64-linux-gnu]" \
+	"-I[file join $gcc_root include c++ $gcc_version backward]" \
+	"-I[file join $gcc_root lib gcc x86_64-linux-gnu $gcc_version include]" \
 	"-I/usr/include" \
 	"-I/usr/include/x86_64-linux-gnu"]
 
@@ -80,38 +91,60 @@ proc emit_general_solution_metrics {} {
 	}
 }
 
+proc configure_solution_inputs {search_path compiler_flags} {
+	solution options set /Input/SearchPath $search_path
+	solution options set /Input/CompilerFlags [join $compiler_flags " "]
+	solution options set /Input/CppStandard c++11
+	solution options set /Flows/SCVerify/USE_CCS_BLOCK true
+}
+
+proc add_design_files {design_files} {
+	foreach design_file $design_files {
+		solution file add $design_file
+	}
+}
+
+proc add_common_libraries {} {
+	solution library add saed32rvt_tt0p78v125c_dw_beh -- -rtlsyntool DesignCompiler -vendor SAED32 -technology {rvt tt0p78v125c}
+	solution library add ccs_sample_mem
+}
+
+proc source_saed_setup {mgc_home} {
+	set saed_setup_tcl [file join $mgc_home pkgs siflibs saed setup_saedlib.tcl]
+	if {![file exists $saed_setup_tcl]} {
+		error "Required SAED setup script not found: $saed_setup_tcl"
+	}
+	source $saed_setup_tcl
+}
+
 cd $script_dir
 
 options defaults
-solution new $solution_name
-solution options set /Input/SearchPath $search_path
-solution options set /Input/CompilerFlags [join $compiler_flags " "]
-solution options set /Input/CppStandard c++14
-solution options set /Flows/SCVerify/USE_CCS_BLOCK true
-
 project new
-foreach design_file $design_files {
-	solution file add $design_file
-}
+flow package require /SCVerify
+flow package require /DesignCompiler
 
+solution new
+solution rename $solution_name
+configure_solution_inputs $search_path $compiler_flags
+add_design_files $design_files
 go new
 go analyze
 solution design set $top_function -top
+directive set -CLOCK_OVERHEAD 0
+directive set -OPT_CONST_MULTS -1
 go compile
-
-solution library add nangate-45nm_beh -- -rtlsyntool OasysRTL
-solution library add ccs_sample_mem
-
+add_common_libraries
 go libraries
+source_saed_setup $mgc_home
 directive set -CLOCKS [list clk [list -CLOCK_PERIOD $clock_period]]
-directive set /$top_function/core -MEM_MAP_THRESHOLD 129
 directive set SCHED_USE_MULTICYCLE true
-
 go assembly
 go architect
 emit_general_solution_metrics
 
 if {![info exists ::env(QWEN_HLS_ENABLE_EXTRACT)] || $::env(QWEN_HLS_ENABLE_EXTRACT) ne "0"} {
+	go allocate
 	go extract
 	emit_general_solution_metrics
 }

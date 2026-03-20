@@ -1,143 +1,173 @@
-# Catapult `ccs_designware` 问题排查记录
+# Catapult DesignWare 状态与实践
 
-## 结论
+## 当前状态
 
-当前 `work_llm_accelerator` 的 prefill attention / MLP Catapult 流程不再尝试真正执行 `solution library add ccs_designware`。这不是绕过问题，而是基于官方示例、官方随包文档和本机环境验证后的明确结论：
+截至 2026-03-20，`work_llm_accelerator` 里与 prefill attention 相关的 Catapult 流程已经从“尝试在 `nangate-45nm_beh + OasysRTL` 上硬插 `ccs_designware`”切换为“直接对齐官方可工作的 DesignCompiler + SAED DW behavioral flow”。
 
-1. `ccs_designware` 的官方用法依赖 DesignCompiler-backed library flow，不是给当前这条 `OasysRTL + nangate-45nm_beh` 流程直接插入就能工作的通用库。
-2. 本机虽然存在 Synopsys DesignWare 资产，但 `dc_shell` 在当前主机上因运行时依赖不兼容而无法启动，因此不能作为 Catapult 所需的 DesignCompiler backend。
-3. 在这种环境下继续硬加 `ccs_designware` 只会稳定触发 `LIB-223`，不会推进到真正的 FP operator binding 问题。
+当前确认有效的路线是：
 
-因此，当前脚本中的处理策略是：
+1. C++ 侧在综合路径下直接调用 `ccs_dw_fp_add/sub/mult/div/mac/sqrt/cmp`。
+2. Tcl 侧显式启用 `flow package require /DesignCompiler`。
+3. solution library 使用 `saed32rvt_tt0p78v125c_dw_beh`，并在 `go libraries` 后 source `setup_saedlib.tcl`。
+4. 正式脚本不再把头文件当作独立 design file 加入 Catapult，只保留真正的 translation unit。
 
-- 允许保留环境变量 `QWEN_HLS_ADD_CCS_DESIGNWARE=1` 用于表达实验意图。
-- 但脚本只打印说明并跳过 `ccs_designware`，避免在一个已确认不成立的库配置上直接失败。
+这条路线已经验证过可以让 score-only context 导出路径通过 `libraries -> assembly -> architect -> allocate -> extract`，并生成包含 `ccs_dw_fp_*_v1` 依赖的 RTL。
 
-## 现象
+## 已修正的认知
 
-之前 attention 流程在 `go compile` 完成后，执行到库加载阶段会报：
+旧文档里“当前应跳过 `ccs_designware`”的说法已经不再准确。更准确的描述是：
 
-```text
-Warning: File '.../pkgs/siflibs/dware/ccs_designware.lib': invalid library selection (LIB-223)
-Error: solution library add: Could not locate library file for library name ccs_designware for current configuration
-```
+1. 不能在 `nangate-45nm_beh + OasysRTL` 这条流上直接加 `ccs_designware`。
+2. 但可以参考官方 `ccs_dw_fp_ops_numeric` 示例，改为 SAED DW behavioral library + DesignCompiler flow。
+3. 仅仅切换库还不够，C++ 前端也要避免继续依赖 generic `fp_*` 包装，否则仍可能落回 `FPOPS.ccs_fp_*` 组件选择失败。
 
-这一点说明问题不在 `go analyze` 或 `go compile`，而在库选择阶段。
+换句话说，问题不是“DesignWare 不能用”，而是“必须用对它的 flow 和前端调用方式”。
 
-## 官方资料给出的信息
+## 根因总结
 
-这次排查使用了 Catapult 2022.2 安装目录内随包示例和文档，核心结论如下。
+这轮验证后，根因可以归纳为两层：
 
-### 1. 官方示例要求 DesignCompiler flow
+### 1. 库流不匹配
 
-Catapult 自带的 `ccs_designware` 示例 TCL 会要求：
+以下组合是已证实不可靠的：
 
-- 有效的 `SYNOPSYS`
-- 有效的 `SAED32_EDK`
-- `flow package require /DesignCompiler`
+- `nangate-45nm_beh`
+- `-rtlsyntool OasysRTL`
+- generic `fp_*` 运算包装
 
-也就是说，官方示例默认前提不是 OasysRTL，而是 Synopsys DesignCompiler 体系。
+它常见的结果不是 `go analyze` 失败，而是在 `go architect` 阶段出现：
 
-### 2. `ccs_designware.lib` 不是和任意 base library 自动兼容
+- `Couldn't find library component for operator 'FPOPS.ccs_fp_*'`
+- `Error: incomplete component selection`
 
-官方 PDF 与脚本都强调：
+### 2. 前端运算包装不匹配
 
-- 随包提供的 `ccs_designware.lib` 是面向特定技术库条件准备的示例库。
-- 如果用户自己的 base library / 工艺环境不同，需要先加载自己的 base library，再通过 `ccs_dw_char_setup.tcl` 重新生成或重建适配的 `ccs_designware.lib`。
+即使头文件已经换成官方 `ccs_dw_fp_lib.h`，如果综合路径里继续通过 `fp_add/fp_mult/fp_mac/fp_cmp` 这类 generic 接口发起运算，Catapult 仍可能回到 generic FP operator binding 路径，而不是稳定落到 `ccs_dw_fp_*` 实例化路径。
 
-这意味着把 `ccs_designware` 直接叠加到当前 `nangate-45nm_beh -- -rtlsyntool OasysRTL` 配置上，本身就不符合官方使用方式。
+因此需要把综合态浮点包装统一收敛为 direct DW 调用。
 
-### 3. 老接口是 legacy 路线
+## 当前代码收敛结果
 
-Catapult 随包头文件里对旧版 `ccs_dw_lib.h` 有明确的 deprecated 提示，建议优先使用新的头和更新后的 base library 支持方式。这进一步说明：
+本轮已经按这个方向做了两类收敛。
 
-- `ccs_designware` 不是“只要头文件能编译就一定能绑定”的纯前端问题。
-- 它和底层 library characterization / flow backend 是绑定在一起的。
+### 1. prefill_only 浮点包装统一
 
-## 本机环境验证结果
+`hls/prefill_only/qwen_catapult_fp.h` 现在提供统一的综合态 direct DW 包装，供以下文件共用：
 
-### 1. Synopsys 安装路径里确实有 DW 资产
+- `qwen_prefill_attention_context_stage_catapult.cpp`
+- `qwen_prefill_attention_kernel.cpp`
+- `qwen_prefill_attention_kv_cache_stage.cpp`
+- `qwen_prefill_mlp_kernel.cpp`
 
-检查路径：
+这样做的目的不是重构风格，而是避免同一仓库里一部分 stage 走 direct DW，一部分 stage 仍走 generic `fp_*`，导致行为再次分叉。
 
-- `/home/yang/tools/synopsys/syn/O-2018.06-SP1`
+### 2. 正式脚本并入 SAED/DW 配置
 
-已确认其中存在：
+以下正式脚本已经并入 SAED DesignCompiler flow：
 
-- `dw/`
-- `packages/dware/`
-- `libraries/syn/dw_foundation.sldb`
-- 多份 DW 浮点相关文档与资源
+- `script/run_catapult_prefill_attention_context.tcl`
+- `script/run_catapult_prefill_attention_kv_cache.tcl`
+- `script/run_catapult_prefill_attention_q_context_output.tcl`
 
-所以问题不是“机器上完全没有 DesignWare 文件”。
+关键变化包括：
 
-### 2. 真正的阻塞是 `dc_shell` 无法运行
+- `CppStandard` 切到 `c++11`
+- 增加 `flow package require /DesignCompiler`
+- library 从 `nangate-45nm_beh` 改为 `saed32rvt_tt0p78v125c_dw_beh`
+- 在 `go libraries` 后执行 `setup_saedlib.tcl`
+- 移除把 `.h` 当作 design file 的写法
+- 统一改成先 `project new`，再创建并配置 solution，避免 `go analyze` 实际丢失 `SearchPath` / `CompilerFlags`
 
-在设置：
+## 当前验证结果
 
-- `SYNOPSYS=/home/yang/tools/synopsys/syn/O-2018.06-SP1`
+截至本轮实际重跑，三条正式脚本的状态已经分化得比较清楚：
 
-后执行最小探测，`dc_shell` 在本机上没有进入 license 阶段就失败，报错包含：
+1. `run_catapult_prefill_attention_context.tcl`
+	- 默认切到已验证的 score-only export top 后，可通过 `assembly -> architect -> allocate -> extract`。
+2. `run_catapult_prefill_attention_kv_cache.tcl`
+	- 修正脚本初始化顺序后，已越过 `analyze/compile/libraries/assembly`，当前首个阻塞点收敛到 `architect` 的 `SCHD-3 / SCHD-20` 调度反馈路径过长。
+3. `run_catapult_prefill_attention_q_context_output.tcl`
+	- 同样在修正初始化顺序后越过了前端和库绑定阶段，当前首个阻塞点也是 `architect` 的调度失败，而不是头文件或 DesignWare 绑定失败。
 
-- `GLIBC_PRIVATE`
-- `PNG12_0`
+这说明本轮脚本收敛已经把问题边界前推到了真正的 HLS 调度层；剩余工作不应再回退到头链或库流排查。
 
-这说明当前主机运行时环境与该版 DC 二进制不兼容。也就是说：
+## 非阻塞现象
 
-- 不是先卡在 license。
-- 而是连 DesignCompiler 进程本身都无法正常启动。
+当前流里仍可能看到两类 warning：
 
-在这种前提下，官方 `ccs_designware` 路线当前不可用。
+1. `SAED32_EDK` 相关环境提示
+2. 对某些 SAED liberty 文件的可读性提示
 
-## 当前代码里的处理
+在本轮验证中，这些 warning 没有阻止 `extract` 产出 RTL，因此当前按非阻塞处理。
 
-以下两个脚本已经改成“说明并跳过”：
+## 最佳实践
 
-- `hls/prefill_only/run_catapult_prefill_attention.tcl`
-- `hls/prefill_only/run_catapult_prefill_mlp.tcl`
+后续在这个仓库里继续做 Catapult + DesignWare 时，建议固定遵守下面几条。
 
-行为是：
+### 1. 不要把“是否能 include 头文件”当成成功标准
 
-- 仍然先加载 `nangate-45nm_beh`
-- 仍然加载 `ccs_sample_mem`
-- 若检测到 `QWEN_HLS_ADD_CCS_DESIGNWARE=1`
-  - 打印 `QWEN_NOTE`
-  - 不再实际执行 `solution library add ccs_designware`
+`go analyze` 或 `go compile` 能过，只说明前端语法和 include 链基本可用。真正决定能否出 RTL 的，往往是 `go architect` 之后的 component selection 和 library binding。
 
-这么做的目的只有一个：
+### 2. 一旦失败点进入 `FPOPS.ccs_fp_*`，不要再回头折腾头文件链
 
-- 把故障点从一个已经确认无效的 library selection 问题，推进到真正还未解决的 FP operator / architect 阶段问题。
+这是 operator library / technology binding 问题，不是 `limits.h`、`cmath`、`ac_*` shim 问题。头文件链只需要保证前端能稳定进到 compile；再继续在这条线上投入时间，收益很低。
 
-## 这不代表 FP operator 问题已经解决
+### 3. 对 isolated stage flow，`design_files` 只放真正的 `.cpp` 翻译单元
 
-当前跳过 `ccs_designware` 之后，只是说明：
+不要把 `.h` 单独 `solution file add` 进去。这个仓库已经反复验证过，Catapult 对 standalone header 输入非常敏感，容易在 analyze 阶段引入不必要的 EDG 问题。
 
-- `LIB-223` 这条分支不该再成为阻塞点。
+### 4. direct DW 包装要集中维护，不要在每个 stage 各写一套
 
-真正还需要继续确认的是：
+综合态浮点包装如果分散在多个源文件里，很容易出现：
 
-- 在当前 OasysRTL / Nangate 路线下，attention 是否会继续进入 `go libraries`、`go assembly`、`go architect`
-- 如果失败，新的首个阻塞点是：
-  - `FPOPS.ccs_fp_*` component selection
-  - 还是其他更靠后的资源、时序、建模问题
+- 一个 stage 改成 direct DW
+- 另一个 stage 还保留 generic `fp_*`
+- 结果正式脚本和子模块行为重新分叉
 
-## 后续启用 `ccs_designware` 的必要条件
+统一放在共享头里，后续迁移或回退才可控。
 
-如果后面仍然要恢复真正的 `solution library add ccs_designware`，至少要先满足下面几条：
+### 5. 正式脚本和临时脚本必须尽快收敛
 
-1. 机器上可运行的 DesignCompiler 环境
-2. 正常的 `SYNOPSYS` 指向
-3. 对应工艺/基础库可用，而不是只靠当前的 OasysRTL base library
-4. 必要时基于自己的 base library 重新生成适配的 `ccs_designware.lib`
+`work/tmp/*.tcl` 可以用于快速试验，但一旦某条 flow 被证明有效，就应该尽快并入 `script/` 下的正式入口。否则很容易出现：
 
-在这些条件没满足之前，继续强加 `ccs_designware` 没有工程价值。
+- 临时脚本能出 RTL
+- 正式脚本仍停留在旧配置
+- 后续验证、handover、复现都失真
 
-## 当前建议
+### 6. 同类 stage 要成组检查，不要只修一个入口
 
-这条线当前的正确推进顺序是：
+一旦 `prefill_only` 中某个 stage 需要 direct DW + SAED flow，通常同类使用 `prefill_catapult_fp_t` 的 attention/mlp/kv-cache stage 都要复核。不要只修当前失败点，否则下一轮会在相邻 stage 复现同样问题。
 
-1. 保持跳过 `ccs_designware`
-2. 重跑 attention Catapult
-3. 确认 `LIB-223` 是否彻底消失
-4. 记录新的首个阻塞点
-5. 再决定是继续做 FP operator mapping，还是继续走 logic expansion 路线
+### 7. 优先保留可验证的最小差异
+
+这类修改应尽量限制在：
+
+- 浮点包装
+- solution library / flow package
+- design_files 输入集合
+
+不要顺手重构算法主体。否则如果 Catapult 结果变化，就很难判断是 library flow 变化还是功能代码变化导致。
+
+### 8. `project new` 必须先于 solution 配置
+
+这轮验证再次确认，若脚本先 `solution new` / `solution options set`，再 `project new`，Catapult 可能在 `go analyze` 实际只把源文件本身传给前端，而忽略已经设置的 `SearchPath` 和 `CompilerFlags`。症状通常是：
+
+- 前端命令行里只有 `-- source.cpp`
+- `cstdint` / `ac_*` / 其他标准头在 `analyze` 直接报 `cannot open source file`
+
+因此正式脚本应固定采用以下顺序：
+
+1. `options defaults`
+2. `project new`
+3. `flow package require ...`
+4. `solution new`
+5. `solution options set ...`
+6. `solution file add ...`
+
+## 下一步建议
+
+当前最自然的后续动作是：
+
+1. 以正式脚本为基准，分别重跑 context、kv-cache、q-context-output 三条 flow。
+2. 记录每条 flow 的最远阶段与首个失败点。
+3. 如果某条 flow 仍失败，优先比较该 stage 是否还残留 generic FP 包装或旧 library 约束，而不是再回到 Nangate/OasysRTL 路线。

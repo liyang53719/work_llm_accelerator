@@ -220,7 +220,6 @@ namespace {
 
 using catapult_fp_t = llm_accel::prefill_catapult_fp_t;
 
-constexpr int kFpIeeeCompliance = 0;
 constexpr int kParallelMacLaneCount = llm_accel::kTileN;
 
 inline catapult_fp_t fp_add_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs);
@@ -271,55 +270,43 @@ inline catapult_fp_t fp_one() {
 }
 
 inline catapult_fp_t fp_add_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_add<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_add(lhs, rhs);
 }
 
 inline catapult_fp_t fp_sub_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_sub<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_sub(lhs, rhs);
 }
 
 inline catapult_fp_t fp_mul_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_mult<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_mul(lhs, rhs);
 }
 
 inline catapult_fp_t fp_div_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_div<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_div(lhs, rhs);
 }
 
 inline catapult_fp_t fp_mac_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs, const catapult_fp_t& acc) {
-  return fp_mac<AC_RND_CONV, kFpIeeeCompliance>(lhs, rhs, acc);
+  return llm_accel::prefill_catapult_fp_mac(lhs, rhs, acc);
 }
 
 inline catapult_fp_t fp_sqrt_op(const catapult_fp_t& value) {
-  return fp_sqrt<AC_RND_CONV, kFpIeeeCompliance>(value);
+  return llm_accel::prefill_catapult_fp_sqrt(value);
 }
 
 inline bool fp_eq_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  ac_int<4, false> rel;
-  catapult_fp_t z0;
-  catapult_fp_t z1;
-  fp_cmp<kFpIeeeCompliance>(lhs, rhs, 0, rel, z0, z1);
-  return rel[0] != 0;
+  return llm_accel::prefill_catapult_fp_eq(lhs, rhs);
 }
 
 inline bool fp_lt_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  ac_int<4, false> rel;
-  catapult_fp_t z0;
-  catapult_fp_t z1;
-  fp_cmp<kFpIeeeCompliance>(lhs, rhs, 0, rel, z0, z1);
-  return rel[1] != 0;
+  return llm_accel::prefill_catapult_fp_lt(lhs, rhs);
 }
 
 inline bool fp_gt_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  ac_int<4, false> rel;
-  catapult_fp_t z0;
-  catapult_fp_t z1;
-  fp_cmp<kFpIeeeCompliance>(lhs, rhs, 0, rel, z0, z1);
-  return rel[2] != 0;
+  return llm_accel::prefill_catapult_fp_gt(lhs, rhs);
 }
 
 inline bool fp_le_op(const catapult_fp_t& lhs, const catapult_fp_t& rhs) {
-  return fp_lt_op(lhs, rhs) || fp_eq_op(lhs, rhs);
+  return llm_accel::prefill_catapult_fp_le(lhs, rhs);
 }
 
 catapult_fp_t approx_exp_fp(const catapult_fp_t& value) {
