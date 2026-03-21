@@ -518,6 +518,41 @@
   2. 若要继续验证“是否能真正保边界”，必须转入 `mpccore` 风格的更强方案：bottom-up / unified CCORE flow
   3. 即先把 `score/value` 单独建成 CCORE library，再在 top flow 中用 `-MAP_TO_MODULE {[CCORE] ...}` 或全局 `-CCORE_FLOW bottomup` 绑定，而不是继续在单 solution 中做小范围 pragma/Tcl 微调
 
+## 2026-03-21 继续压 value 热路径：去掉 key-tile 局部 value state 的二次累加层
+
+### 本轮动作
+- 回顾 `v10` 后的 value 路径，确认当前 active flow 里仍保留一层 `tile_denom/tile_accum -> merge_context_value_head_state(...) -> head_state_denom/head_state_accum` 的局部中间态。
+- 这层结构的职责只是把同一个 key tile 内的 value 累加先落到局部数组，再在 tile 结束后整体 merge 回长生命周期 `head_state_*`；对当前 head-group 流式路径来说，会额外引入：
+  1. 一份完整的 `tile_denom/tile_accum` 局部状态。
+  2. 一次独立的 merge helper。
+  3. 一次 tile 级 state 初始化与 tile 末尾归并。
+- 本轮在 `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp` 中直接去掉这层局部中间态：
+  1. 删除 `merge_context_value_head_state(...)` helper。
+  2. 删除 `process_context_value_tile(...)` 内部的 `tile_denom/tile_accum` 局部数组和对应初始化。
+  3. 让每个 key 的 `exp_score * V` 直接累加进长生命周期 `denom/accum`。
+
+### 试错与验证
+- 先尝试把几个 2-head helper loop 改成 `hls_unroll no`，得到 `v11`：
+  1. `assembly Real ops = 202`
+  2. `loops Real ops = 192`
+  3. `architect Real ops = 556`
+- 结论：helper de-unroll 方向无效，已回退，不进入提交。
+- 再对“去掉 tile 局部 value state 二次累加层”做 full-context quick run：
+  - 命令：`env QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 QWEN_CONTEXT_SOLUTION_NAME=qwen_prefill_attention_context_query_tile_stream_catapult_reduce_ops_v12 QWEN_CONTEXT_TOP_FUNCTION=qwen_prefill_attention_context_query_tile_stream_catapult make catapult_prefill_attention_context`
+  - `analyze`: `5.45s / 1532852kB peak`
+  - `compile`: `67.29s / 1860532kB / 1931636kB peak`
+  - `assembly`: `Real ops = 193`
+  - `loops`: `Real ops = 182`
+  - `architect`: `Real ops = 543`
+
+### 对比结论
+- 相比上一个已推送稳定基线 `v10`：
+  1. `assembly Real ops`: `202 -> 193`，下降 `9`
+  2. `loops Real ops`: `190 -> 182`，下降 `8`
+  3. `architect Real ops`: `554 -> 543`，下降 `11`
+- 说明当前真正有效的切点不是“压 2-head helper 的 unroll”，而是“删掉 value path 内部按 key tile 先局部堆状态、再 merge 回主状态”的中间层级。
+- 下一步继续下探时，应优先检查 value path 是否还存在类似的局部状态镜像或重复归并，而不是再优先做 pragma 微调。
+
 ### 2026-03-18 bottom-up CCORE flow 首次跑通到 child compile
 - 本轮先把 `script/run_catapult_prefill_attention_context.tcl` 改成真正的多 solution bottom-up 结构：
   1. `prefill_attention_context_score_stream_stage_fp` 先单独建 child solution

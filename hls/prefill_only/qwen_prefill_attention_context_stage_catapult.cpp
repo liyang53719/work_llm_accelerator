@@ -821,26 +821,6 @@ void accumulate_context_weighted_value_packet(
   }
 }
 
-void merge_context_value_head_state(
-    int head_base,
-    int head_end,
-    const catapult_fp_t tile_denom[kContextHeadGroupSize],
-    const catapult_fp_t tile_accum[kContextHeadGroupSize][llm_accel::kHeadDim],
-    catapult_fp_t denom[kContextHeadGroupSize],
-    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
-#pragma hls_unroll yes
-  for (int head_offset = 0; head_offset < kContextHeadGroupSize; ++head_offset) {
-    if (head_base + head_offset < head_end) {
-      denom[head_offset] = fp_add_op(denom[head_offset], tile_denom[head_offset]);
-
-#pragma hls_unroll no
-      for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
-        accum[head_offset][dim] = fp_add_op(accum[head_offset][dim], tile_accum[head_offset][dim]);
-      }
-    }
-  }
-}
-
 void stream_context_v_token_packet_words(
     const ContextVTokenPacket& v_packet,
     ac_channel<ContextFpWordPacket>& value_word_chan) {
@@ -1034,15 +1014,6 @@ void process_context_value_tile(
     ac_channel<ContextFpWordPacket>& source_value_word_chan,
     catapult_fp_t denom[kContextHeadGroupSize],
     catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
-  catapult_fp_t tile_denom[kContextHeadGroupSize];
-  catapult_fp_t tile_accum[kContextHeadGroupSize][llm_accel::kHeadDim];
-
-#pragma hls_array_partition variable=tile_denom complete dim=1
-#pragma hls_array_partition variable=tile_accum complete dim=1
-#pragma hls_array_partition variable=tile_accum complete dim=2
-
-  init_context_value_head_state_packet(head_base, head_end, tile_denom, tile_accum);
-
 ATTN_CONTEXT_VALUE_TILE_LOOP:
 #pragma hls_unroll no
 #pragma hls_pipeline_init_interval 6
@@ -1072,11 +1043,9 @@ ATTN_CONTEXT_VALUE_TILE_LOOP:
         v_packet,
         head_base,
         head_end,
-        tile_denom,
-        tile_accum);
+        denom,
+        accum);
   }
-
-  merge_context_value_head_state(head_base, head_end, tile_denom, tile_accum, denom, accum);
 }
 
 void compute_context_max_score_tile_tasks(
