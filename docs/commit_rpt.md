@@ -259,6 +259,45 @@
   2. `mpccore`
   3. `ParallelCCORE`
 
+## 2026-03-21 context value 路径继续收缩：去掉完整 ContextTokenPacket 中间态
+
+### 本轮动作
+- 延续“12 个 head 独立、head-group 内做流水”的方向，继续收缩 `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp` 的 value 路径中间状态。
+- 保留外部 `context_word_chan` 输出接口不变，但把 value-stage 内部的完整 `ContextTokenPacket context_packet` 物化去掉。
+- 新增 `stream_context_head_state_words(...)`，在单个 head-group 的 `denom/accum` 完成后直接按 word 写出结果流。
+- `prefill_attention_context_value_head_group_stage_fp(...)` 不再回填 `context_packet`，改为直接写 `context_word_chan`。
+- `prefill_attention_context_query_value_fp(...)` 在每个 head-group 内先切出对应的 `ContextHeadGroupScorePacket`，再直接流式写出当前 group 的 context 结果。
+- `prefill_attention_context_value_stream_stage_fp(...)` 中移除本地 `ContextTokenPacket` 和最后的整包 `stream_context_result_packet_words(...)`。
+
+### 设计意图
+- 之前虽然 score/value 热路径已经压到 `kContextHeadGroupSize=2`，但 value-stage 末端仍会把 12 个 head 的最终结果集中回填到一个完整 `ContextTokenPacket`。
+- Catapult 需要为这块大中间对象保留额外状态、连线和调度图，仍然放大了 `value_stream_stage` 的 compile/allocate 复杂度。
+- 本轮目标是让 head-group 结果“算完即写出”，把 12 个 head 的独立性落实到结果生成路径，而不是只落实在局部累加路径。
+
+### 本轮验证
+- 使用 full-context top：`qwen_prefill_attention_context_query_tile_stream_catapult`
+- 运行命令：
+  `QWEN_CONTEXT_SOLUTION_NAME=qwen_prefill_attention_context_query_tile_stream_catapult_reduce_ops_v7 QWEN_CONTEXT_TOP_FUNCTION=qwen_prefill_attention_context_query_tile_stream_catapult make catapult_prefill_attention_context`
+- 关键结果：
+  1. `assembly`: `Total ops = 2593, Real ops = 204, Vars = 591`
+  2. `architect`: `Total ops = 6255, Real ops = 608, Vars = 1287`
+  3. `architect` 常驻内存：`1795008kB`
+  4. `architect` 峰值内存：`1893324kB`
+- 相对上一轮稳定基线 `v6`：
+  1. `assembly Real ops`: `207 -> 204`
+  2. `architect Real ops`: `611 -> 608`
+  3. `architect` 常驻内存：`1856472kB -> 1795008kB`
+  4. `architect` 峰值内存：`1954788kB -> 1893324kB`
+- `allocate` 已稳定进入长跑区间；在 `120s` 观察窗内没有新错误，内存平台保持在 `1795008kB`，因此本轮在拿到足够比较数据后主动终止长跑，不继续等 `extract`。
+
+### 当前判断
+- 这一步证明 value 路径里“完整 token 结果缓存”确实仍是多余复杂度来源，去掉后 `assembly/architect` 都继续小幅下降。
+- 收益幅度仍然不大，说明剩余大头已经不只是结果包组装，而是 score/value 两段之间仍保留的全头宽接口和部分串行控制结构。
+- 下一步应继续沿着同一方向推进：
+  1. 进一步压缩 `max_score` 的全头宽跨段状态
+  2. 尽量把 head-group 独立性继续前推到 score/value 交界处
+  3. 避免重新引入新的整 token 或全 head 宽中间对象
+
 ## 2026-03-18 真正的边界重构：score/value child-top 去掉 k_proj/v_proj 裸指针
 
 ### 本轮动作
