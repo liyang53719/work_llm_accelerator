@@ -337,6 +337,45 @@
   2. 复查 score-only export/top 路径里遗留的整 `ContextScorePacket` 使用，避免后续重新把全头宽状态带回来
   3. 在保持当前 `v8` 为可提交 checkpoint 的前提下，再看是否能继续把 `architect Real ops` 往 `500` 以下压
 
+## 2026-03-21 继续清理遗留全宽状态：score-only export top 也改成 head-group max_score 流
+
+### 本轮动作
+- 沿着上一轮的同一方向，继续回收 `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp` 中遗留的整 `ContextScorePacket` 路径。
+- 删除只剩历史残留用途的全宽 `ContextScorePacket` 定义、对应 `stream/read_context_score_packet_words(...)` helper，以及未再被主路径调用的 `prefill_attention_context_query_max_score_fp(...)`。
+- `prefill_attention_context_score_stream_rtl_export_top_core(...)` 不再使用 `max_score_buffer[12]` 这类整 query 宽缓存，而是和 full-context 主路径保持一致：
+  1. 每个 head-group 单独初始化 `ContextHeadGroupScorePacket`
+  2. 每组独立更新 `max_score`
+  3. 每组完成后立即按 group 写出到 `max_score_word_chan`
+- 这样同一源文件里，`max_score` 的活跃实现路径就统一成了“按 group 生产、按 group 消费”，避免 score-only/export top 后续再把全头宽状态带回来。
+
+### 设计意图
+- 上一轮已经把 full-context 主路径上的 score/value 交界改成了 head-group 流，但同文件里默认 score-only export top 仍保留整 `ContextScorePacket` 和整头宽 `max_score_buffer`。
+- 即使这些遗留逻辑不在当前 full-context 主热路径里，它们仍会增加这份 translation unit 的状态模型复杂度，也容易在后续调试时把全头宽中间态重新带回来。
+- 本轮目标不是进一步压低 `v8` 指标，而是把“按 group 生产、按 group 消费”从主路径扩展到 score-only/export 侧，统一实现形态，缩小遗留 compile 面。
+
+### 本轮验证
+- 默认 score-only top：`prefill_attention_context_score_stream_rtl_export_top_catapult`
+- 运行命令：
+  `QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 make catapult_prefill_attention_context`
+- 关键结果：
+  1. `analyze` 完成：`6.46s`，内存 `1532864kB`
+  2. `compile` 完成：`8.67s`，内存 `1606688kB`
+- 同时对 full-context 主路径做无提取快速复核：
+  `QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 QWEN_CONTEXT_SOLUTION_NAME=qwen_prefill_attention_context_query_tile_stream_catapult_reduce_ops_v9 QWEN_CONTEXT_TOP_FUNCTION=qwen_prefill_attention_context_query_tile_stream_catapult make catapult_prefill_attention_context`
+- full-context 关键结果：
+  1. `compile` 完成：`79.93s`
+  2. `assembly`: `Total ops = 2581, Real ops = 202, Vars = 585`
+  3. `loops`: `Total ops = 4627, Real ops = 190, Vars = 915`
+  4. `architect`: `Total ops = 6261, Real ops = 554, Vars = 1258`
+  5. `architect` 常驻内存：`1754180kB`
+  6. `architect` 峰值内存：`1931636kB`
+
+### 当前判断
+- 这一步更偏“收口遗留实现”和“防止回退”而不是继续直接降 ops，但它确认了：
+  1. 默认 score-only export top 已经可以在没有整 `ContextScorePacket` 的情况下稳定通过 `analyze/compile`
+  2. full-context 主路径的 `assembly/loops/architect` 指标没有回退，仍保持在 `202 / 190 / 554`
+- 因此当前源文件里，`max_score` 的活跃实现已经统一到 head-group 粒度；后续继续压缩时，可以更专注地盯住 value-stage 内部仍然跨 `key_tile` 长驻的 `denom/accum` 状态，而不用再担心旁路旧实现把全头宽模型重新引进来。
+
 ## 2026-03-18 真正的边界重构：score/value child-top 去掉 k_proj/v_proj 裸指针
 
 ### 本轮动作
