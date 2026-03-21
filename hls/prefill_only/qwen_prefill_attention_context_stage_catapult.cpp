@@ -948,7 +948,6 @@ void accumulate_context_value_key_packet_words(
       accum);
 }
 
-#pragma hls_design block
 void stream_context_value_key_tasks(
     const ContextQueryPacket& q_packet,
     int key_begin,
@@ -978,7 +977,6 @@ ATTN_CONTEXT_VALUE_WEIGHT_KEY_LOOP:
   }
 }
 
-#pragma hls_design block
 void accumulate_context_value_key_tasks(
     int key_begin,
     int key_end,
@@ -1081,7 +1079,6 @@ ATTN_CONTEXT_VALUE_TILE_LOOP:
   merge_context_value_head_state(head_base, head_end, tile_denom, tile_accum, denom, accum);
 }
 
-#pragma hls_design block
 void compute_context_max_score_tile_tasks(
     const ContextQueryPacket& q_packet,
     int head_base,
@@ -1106,7 +1103,6 @@ void compute_context_max_score_tile_tasks(
   }
 }
 
-#pragma hls_design block
 void compute_context_value_tile_tasks(
     const ContextQueryPacket& q_packet,
     int head_base,
@@ -1167,7 +1163,6 @@ int count_context_key_tiles(
   return (query_limit + key_tile - 1) / key_tile;
 }
 
-#pragma hls_design block
 void stream_context_key_tile_meta_packets(
     int seq_len,
     int query_index,
@@ -1702,7 +1697,6 @@ ATTN_CONTEXT_SCORE_KEY_LOOP:
   }
 }
 
-#pragma hls_design top
 void prefill_attention_context_score_stream_top_catapult(
     int seq_len,
     int query_count,

@@ -376,6 +376,45 @@
   2. full-context 主路径的 `assembly/loops/architect` 指标没有回退，仍保持在 `202 / 190 / 554`
 - 因此当前源文件里，`max_score` 的活跃实现已经统一到 head-group 粒度；后续继续压缩时，可以更专注地盯住 value-stage 内部仍然跨 `key_tile` 长驻的 `denom/accum` 状态，而不用再担心旁路旧实现把全头宽模型重新引进来。
 
+## 2026-03-21 继续清掉 compile 噪声面：移除未使用 legacy stage 的 hls_design directive
+
+### 本轮动作
+- 继续沿着“先缩小 compile 面，再追主热路径”的思路，检查 `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp` 里仍被 Catapult 识别为 design routine、但已经不再参与当前主路径计算的遗留函数。
+- 确认以下 6 个函数在当前源码里只有定义、没有调用，但仍因 `hls_design` directive 被扫描进 compile：
+  1. `stream_context_value_key_tasks(...)`
+  2. `accumulate_context_value_key_tasks(...)`
+  3. `compute_context_max_score_tile_tasks(...)`
+  4. `compute_context_value_tile_tasks(...)`
+  5. `stream_context_key_tile_meta_packets(...)`
+  6. `prefill_attention_context_score_stream_top_catapult(...)`
+- 本轮不改这些函数的算法实现，只移除它们的 `hls_design block/top` directive，让 Catapult 不再把它们当作 design routine 单独建模。
+
+### 设计意图
+- 这些遗留 stage 已经不走当前 full-context 主路径，但在 `analyze/compile` 日志里仍会以 `Found design routine ...` 形式出现，继续扩大 translation unit 的 compile 面。
+- 这类噪声 routine 未必直接决定 `architect Real ops`，但会增加前端枚举和 compile 图管理负担，也会模糊真正的热点定位。
+- 因此本轮目标是把“无调用但仍被 directive 强行暴露”的层级边界先收干净，让后续继续盯 value-stage 本体时，日志噪声更少、归因更清楚。
+
+### 本轮验证
+- 使用 full-context top：`qwen_prefill_attention_context_query_tile_stream_catapult`
+- 运行命令：
+  `QWEN_HLS_ENABLE_EXTRACT=0 QWEN_HLS_MEMORY_POLL_SEC=5 QWEN_CONTEXT_SOLUTION_NAME=qwen_prefill_attention_context_query_tile_stream_catapult_reduce_ops_v10 QWEN_CONTEXT_TOP_FUNCTION=qwen_prefill_attention_context_query_tile_stream_catapult make catapult_prefill_attention_context`
+- 关键结果：
+  1. `analyze` 完成：`6.50s`
+  2. `compile` 完成：`84.78s`
+  3. `assembly`: `Total ops = 2581, Real ops = 202, Vars = 585`
+  4. `loops`: `Total ops = 4627, Real ops = 190, Vars = 915`
+  5. `architect`: `Total ops = 6261, Real ops = 554, Vars = 1258`
+  6. `architect` 常驻内存：`1754180kB`
+  7. `architect` 峰值内存：`1931636kB`
+- 与上一轮相比，指标没有变化；但日志中原先那 6 个 `Found design routine ...` 条目已全部消失，说明 compile 面清理生效。
+
+### 当前判断
+- 这一步确认了：这些 legacy stage 确实只是 compile 噪声源，而不是当前 `554` 的主矛盾。
+- 好处是明确的：
+  1. translation unit 的 design routine 集合更干净了
+  2. 后续定位 value-stage 真正热点时，不再被无调用旧 stage 干扰
+- 结论也同样明确：下一步不应继续在类似遗留 wrapper 上花时间，而应回到 value-stage 内部仍跨 `key_tile` 长驻的 `denom/accum` 与 `merge_context_value_head_state(...)` 这类真实热路径上。
+
 ## 2026-03-18 真正的边界重构：score/value child-top 去掉 k_proj/v_proj 裸指针
 
 ### 本轮动作
