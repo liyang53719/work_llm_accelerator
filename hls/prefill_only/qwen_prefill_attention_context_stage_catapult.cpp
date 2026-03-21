@@ -539,14 +539,98 @@ void rmsnorm_apply_scale_chunk_fp(
     output[index] = fp_mul_op(input[index], scaled_weight[index]);
   }
 }
+  inline catapult_fp_t add4_fp(
+      const catapult_fp_t& v0,
+      const catapult_fp_t& v1,
+      const catapult_fp_t& v2,
+      const catapult_fp_t& v3) {
+    return fp_add_op(fp_add_op(v0, v1), fp_add_op(v2, v3));
+  }
+
+  inline catapult_fp_t add8_fp(
+      const catapult_fp_t& v0,
+      const catapult_fp_t& v1,
+      const catapult_fp_t& v2,
+      const catapult_fp_t& v3,
+      const catapult_fp_t& v4,
+      const catapult_fp_t& v5,
+      const catapult_fp_t& v6,
+      const catapult_fp_t& v7) {
+    return fp_add_op(add4_fp(v0, v1, v2, v3), add4_fp(v4, v5, v6, v7));
+  }
+
+  inline catapult_fp_t add16_fp(
+      const catapult_fp_t& v0,
+      const catapult_fp_t& v1,
+      const catapult_fp_t& v2,
+      const catapult_fp_t& v3,
+      const catapult_fp_t& v4,
+      const catapult_fp_t& v5,
+      const catapult_fp_t& v6,
+      const catapult_fp_t& v7,
+      const catapult_fp_t& v8,
+      const catapult_fp_t& v9,
+      const catapult_fp_t& v10,
+      const catapult_fp_t& v11,
+      const catapult_fp_t& v12,
+      const catapult_fp_t& v13,
+      const catapult_fp_t& v14,
+      const catapult_fp_t& v15) {
+    return fp_add_op(
+        add8_fp(v0, v1, v2, v3, v4, v5, v6, v7),
+        add8_fp(v8, v9, v10, v11, v12, v13, v14, v15));
+  }
+
+  template <typename Lhs, typename Rhs>
+  inline catapult_fp_t dot_product_chunk_8_fp(const Lhs& lhs, const Rhs& rhs, int base_index) {
+    const catapult_fp_t p0 = fp_mul_op(lhs[base_index], rhs[base_index]);
+    const catapult_fp_t p1 = fp_mul_op(lhs[base_index + 1], rhs[base_index + 1]);
+    const catapult_fp_t p2 = fp_mul_op(lhs[base_index + 2], rhs[base_index + 2]);
+    const catapult_fp_t p3 = fp_mul_op(lhs[base_index + 3], rhs[base_index + 3]);
+    const catapult_fp_t p4 = fp_mul_op(lhs[base_index + 4], rhs[base_index + 4]);
+    const catapult_fp_t p5 = fp_mul_op(lhs[base_index + 5], rhs[base_index + 5]);
+    const catapult_fp_t p6 = fp_mul_op(lhs[base_index + 6], rhs[base_index + 6]);
+    const catapult_fp_t p7 = fp_mul_op(lhs[base_index + 7], rhs[base_index + 7]);
+
+    return add8_fp(p0, p1, p2, p3, p4, p5, p6, p7);
+  }
 
 template <typename Lhs, typename Rhs>
 catapult_fp_t dot_product_128_fp(const Lhs& lhs, const Rhs& rhs) {
-  catapult_fp_t lane_products[kParallelMacLaneCount];
-#define DOT_LANE(i) lane_products[i] = fp_mul_op(lhs[i], rhs[i]);
-  HLS_DO_128(DOT_LANE, 0)
-#undef DOT_LANE
-  return reduce_sum_128_fp(lane_products);
+    const catapult_fp_t chunk0 = dot_product_chunk_8_fp(lhs, rhs, 0);
+    const catapult_fp_t chunk1 = dot_product_chunk_8_fp(lhs, rhs, 8);
+    const catapult_fp_t chunk2 = dot_product_chunk_8_fp(lhs, rhs, 16);
+    const catapult_fp_t chunk3 = dot_product_chunk_8_fp(lhs, rhs, 24);
+    const catapult_fp_t chunk4 = dot_product_chunk_8_fp(lhs, rhs, 32);
+    const catapult_fp_t chunk5 = dot_product_chunk_8_fp(lhs, rhs, 40);
+    const catapult_fp_t chunk6 = dot_product_chunk_8_fp(lhs, rhs, 48);
+    const catapult_fp_t chunk7 = dot_product_chunk_8_fp(lhs, rhs, 56);
+    const catapult_fp_t chunk8 = dot_product_chunk_8_fp(lhs, rhs, 64);
+    const catapult_fp_t chunk9 = dot_product_chunk_8_fp(lhs, rhs, 72);
+    const catapult_fp_t chunk10 = dot_product_chunk_8_fp(lhs, rhs, 80);
+    const catapult_fp_t chunk11 = dot_product_chunk_8_fp(lhs, rhs, 88);
+    const catapult_fp_t chunk12 = dot_product_chunk_8_fp(lhs, rhs, 96);
+    const catapult_fp_t chunk13 = dot_product_chunk_8_fp(lhs, rhs, 104);
+    const catapult_fp_t chunk14 = dot_product_chunk_8_fp(lhs, rhs, 112);
+    const catapult_fp_t chunk15 = dot_product_chunk_8_fp(lhs, rhs, 120);
+
+    return add16_fp(
+        chunk0,
+        chunk1,
+        chunk2,
+        chunk3,
+        chunk4,
+        chunk5,
+        chunk6,
+        chunk7,
+        chunk8,
+        chunk9,
+        chunk10,
+        chunk11,
+        chunk12,
+        chunk13,
+        chunk14,
+        chunk15);
 }
 
 template <typename AccumHead>
@@ -654,6 +738,12 @@ void read_context_score_packet_words(
   ac_channel<ContextFpWordPacket>& max_score_word_chan,
   ContextScorePacket& max_score_packet);
 
+void init_context_value_head_state_packet(
+    int head_base,
+    int head_end,
+    catapult_fp_t denom[kContextHeadGroupSize],
+    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]);
+
 void compute_context_score_packet(
     const ContextQueryPacket& q_packet,
     const ContextKvTokenPacket& kv_packet,
@@ -712,15 +802,36 @@ void accumulate_context_weighted_value_packet(
     const ContextVTokenPacket& v_packet,
     int head_base,
     int head_end,
-    ContextValueHeadStatePacket& head_state_packet) {
+    catapult_fp_t denom[kContextHeadGroupSize],
+    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
 #pragma hls_unroll yes
   for (int head_offset = 0; head_offset < kContextHeadGroupSize; ++head_offset) {
     if (head_base + head_offset < head_end) {
       const int head = head_base + head_offset;
       const int kv_head = head / kNumGroups;
       const catapult_fp_t* v_head = v_packet.v_data + kv_head * llm_accel::kHeadDim;
-      head_state_packet.denom[head_offset] = fp_add_op(head_state_packet.denom[head_offset], exp_score_packet.data[head_offset]);
-      scaled_accum_128_fp(exp_score_packet.data[head_offset], v_head, head_state_packet.accum[head_offset]);
+      denom[head_offset] = fp_add_op(denom[head_offset], exp_score_packet.data[head_offset]);
+      scaled_accum_128_fp(exp_score_packet.data[head_offset], v_head, accum[head_offset]);
+    }
+  }
+}
+
+void merge_context_value_head_state(
+    int head_base,
+    int head_end,
+    const catapult_fp_t tile_denom[kContextHeadGroupSize],
+    const catapult_fp_t tile_accum[kContextHeadGroupSize][llm_accel::kHeadDim],
+    catapult_fp_t denom[kContextHeadGroupSize],
+    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
+#pragma hls_unroll yes
+  for (int head_offset = 0; head_offset < kContextHeadGroupSize; ++head_offset) {
+    if (head_base + head_offset < head_end) {
+      denom[head_offset] = fp_add_op(denom[head_offset], tile_denom[head_offset]);
+
+#pragma hls_unroll yes
+      for (int dim = 0; dim < llm_accel::kHeadDim; ++dim) {
+        accum[head_offset][dim] = fp_add_op(accum[head_offset][dim], tile_accum[head_offset][dim]);
+      }
     }
   }
 }
@@ -816,7 +927,8 @@ void accumulate_context_value_key_packet_words(
     int head_end,
     ac_channel<ContextFpWordPacket>& exp_score_word_chan,
     ac_channel<ContextFpWordPacket>& value_word_chan,
-    ContextValueHeadStatePacket& head_state_packet) {
+  catapult_fp_t denom[kContextHeadGroupSize],
+  catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
   ContextScorePacket exp_score_packet;
   ContextVTokenPacket v_packet;
 
@@ -827,7 +939,8 @@ void accumulate_context_value_key_packet_words(
       v_packet,
       head_base,
       head_end,
-      head_state_packet);
+      denom,
+      accum);
 }
 
 #pragma hls_design block
@@ -868,7 +981,8 @@ void accumulate_context_value_key_tasks(
     int head_end,
     ac_channel<ContextFpWordPacket>& exp_score_word_chan,
     ac_channel<ContextFpWordPacket>& value_word_chan,
-  ContextValueHeadStatePacket& head_state_packet) {
+    catapult_fp_t denom[kContextHeadGroupSize],
+    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
 ATTN_CONTEXT_VALUE_ACCUM_KEY_LOOP:
 #pragma hls_pipeline_init_interval 2
   for (int key_index = key_begin; key_index < key_end; ++key_index) {
@@ -878,7 +992,8 @@ ATTN_CONTEXT_VALUE_ACCUM_KEY_LOOP:
         head_end,
         exp_score_word_chan,
         value_word_chan,
-        head_state_packet);
+        denom,
+        accum);
   }
 }
 
@@ -914,9 +1029,20 @@ void process_context_value_tile(
     const ContextScorePacket& max_score_packet,
     ac_channel<ContextFpWordPacket>& source_key_word_chan,
     ac_channel<ContextFpWordPacket>& source_value_word_chan,
-    ContextValueHeadStatePacket& head_state_packet) {
+    catapult_fp_t denom[kContextHeadGroupSize],
+    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
+  catapult_fp_t tile_denom[kContextHeadGroupSize];
+  catapult_fp_t tile_accum[kContextHeadGroupSize][llm_accel::kHeadDim];
+
+#pragma hls_array_partition variable=tile_denom complete dim=1
+#pragma hls_array_partition variable=tile_accum complete dim=1
+#pragma hls_array_partition variable=tile_accum complete dim=2
+
+  init_context_value_head_state_packet(head_base, head_end, tile_denom, tile_accum);
+
 ATTN_CONTEXT_VALUE_TILE_LOOP:
-#pragma hls_pipeline_init_interval 4
+#pragma hls_unroll no
+#pragma hls_pipeline_init_interval 6
   for (int key_index = key_begin; key_index < key_end; ++key_index) {
     (void)key_index;
     ContextKTokenPacket k_packet;
@@ -943,8 +1069,11 @@ ATTN_CONTEXT_VALUE_TILE_LOOP:
         v_packet,
         head_base,
         head_end,
-        head_state_packet);
+        tile_denom,
+        tile_accum);
   }
+
+  merge_context_value_head_state(head_base, head_end, tile_denom, tile_accum, denom, accum);
 }
 
 #pragma hls_design block
@@ -982,7 +1111,8 @@ void compute_context_value_tile_tasks(
     const ContextScorePacket& max_score_packet,
     ac_channel<ContextFpWordPacket>& source_key_word_chan,
     ac_channel<ContextFpWordPacket>& source_value_word_chan,
-    ContextValueHeadStatePacket& head_state_packet) {
+    catapult_fp_t denom[kContextHeadGroupSize],
+    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
   const catapult_fp_t attention_scaling = fp_const(0.08838834764831845f);
 
   for (int tile_slot = 0; tile_slot < key_tile_count; ++tile_slot) {
@@ -997,7 +1127,8 @@ void compute_context_value_tile_tasks(
         max_score_packet,
         source_key_word_chan,
         source_value_word_chan,
-        head_state_packet);
+        denom,
+        accum);
   }
 }
 
@@ -1150,15 +1281,16 @@ void init_context_max_score_packet(
 void init_context_value_head_state_packet(
     int head_base,
     int head_end,
-    ContextValueHeadStatePacket& packet) {
+    catapult_fp_t denom[kContextHeadGroupSize],
+    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
 #pragma hls_unroll yes
   for (int head_offset = 0; head_offset < kContextHeadGroupSize; ++head_offset) {
     if (head_offset < head_end - head_base) {
-      packet.denom[head_offset] = fp_zero();
-      zero_head_accum_128_fp(packet.accum[head_offset]);
+      denom[head_offset] = fp_zero();
+      zero_head_accum_128_fp(accum[head_offset]);
     } else {
-      packet.denom[head_offset] = fp_zero();
-      zero_head_accum_128_fp(packet.accum[head_offset]);
+      denom[head_offset] = fp_zero();
+      zero_head_accum_128_fp(accum[head_offset]);
     }
   }
 }
@@ -1198,7 +1330,8 @@ void compute_context_value_head_state_packet(
     int head_end,
     ac_channel<ContextFpWordPacket>& source_key_word_chan,
     ac_channel<ContextFpWordPacket>& source_value_word_chan,
-    ContextValueHeadStatePacket& packet) {
+    catapult_fp_t denom[kContextHeadGroupSize],
+    catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim]) {
   const int query_limit = min_int(seq_len, query_index + 1);
 
   for (int key_begin = 0; key_begin < query_limit; key_begin += key_tile) {
@@ -1213,12 +1346,14 @@ void compute_context_value_head_state_packet(
         max_score_packet,
         source_key_word_chan,
         source_value_word_chan,
-        packet);
+        denom,
+        accum);
   }
 }
 
 void store_context_head_state_packet(
-    const ContextValueHeadStatePacket& packet,
+    const catapult_fp_t denom[kContextHeadGroupSize],
+    const catapult_fp_t accum[kContextHeadGroupSize][llm_accel::kHeadDim],
     int head_base,
     int head_end,
   ContextTokenPacket& context_packet) {
@@ -1226,10 +1361,10 @@ void store_context_head_state_packet(
   for (int head = head_base; head < head_end; ++head) {
     const int head_offset = head - head_base;
   catapult_fp_t* context_head = context_packet.data + head * llm_accel::kHeadDim;
-    const catapult_fp_t inv_denom = fp_gt_op(packet.denom[head_offset], fp_zero())
-        ? approx_reciprocal_fp(packet.denom[head_offset])
+    const catapult_fp_t inv_denom = fp_gt_op(denom[head_offset], fp_zero())
+        ? approx_reciprocal_fp(denom[head_offset])
         : fp_zero();
-    scale_store_128_fp(packet.accum[head_offset], inv_denom, context_head);
+    scale_store_128_fp(accum[head_offset], inv_denom, context_head);
   }
 }
 
@@ -1296,9 +1431,14 @@ void prefill_attention_context_value_head_group_stage_fp(
     ac_channel<ContextFpWordPacket>& source_key_word_chan,
     ac_channel<ContextFpWordPacket>& source_value_word_chan,
     ContextTokenPacket& context_packet) {
-  ContextValueHeadStatePacket head_state_packet;
+  catapult_fp_t head_state_denom[kContextHeadGroupSize];
+  catapult_fp_t head_state_accum[kContextHeadGroupSize][llm_accel::kHeadDim];
 
-  init_context_value_head_state_packet(head_base, head_end, head_state_packet);
+#pragma hls_array_partition variable=head_state_denom complete dim=1
+#pragma hls_array_partition variable=head_state_accum complete dim=1
+#pragma hls_array_partition variable=head_state_accum complete dim=2
+
+  init_context_value_head_state_packet(head_base, head_end, head_state_denom, head_state_accum);
   compute_context_value_head_state_packet(
       q_packet,
       max_score_packet,
@@ -1309,8 +1449,9 @@ void prefill_attention_context_value_head_group_stage_fp(
       head_end,
       source_key_word_chan,
       source_value_word_chan,
-      head_state_packet);
-  store_context_head_state_packet(head_state_packet, head_base, head_end, context_packet);
+        head_state_denom,
+        head_state_accum);
+      store_context_head_state_packet(head_state_denom, head_state_accum, head_base, head_end, context_packet);
 }
 
 void prefill_attention_context_query_value_fp(

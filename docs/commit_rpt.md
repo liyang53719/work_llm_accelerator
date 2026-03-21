@@ -746,3 +746,37 @@
   1. 直接把 `script/run_catapult_prefill_attention_context.tcl` 的默认 top 从 `score-only` 切到 full-context。
   2. 提前启动 full prefill top 的 RTL 生成。
 - 下一步应继续围绕 `head_state_packet.accum` 的存储/访问形态做根因修复，优先目标是打断 `RAM read -> DW FP MAC -> RAM write` 的 recurrence，而不是再做同类外层结构改造。
+
+## 2026-03-21 value-stage 根因修复：快速 `SCHD-3` 已清除，当前卡点转为 allocate 长时间搜索
+
+### 本轮动作
+- 继续只动 `hls/prefill_only/qwen_prefill_attention_context_stage_catapult.cpp`，围绕 value-stage 的 recurrence 做根因修复，不再扩大脚本或其他 stage 的修改面。
+- 已验证的关键收敛动作包括：
+  1. 将 value 累加长期状态从 `ContextValueHeadStatePacket` 热路径中拆成显式 `denom/accum` 数组。
+  2. 将“每个 key 都直接写回长期 `head_state_accum`”改成“tile 内局部 `tile_accum/tile_denom` 归并，tile 结束后只 merge 一次到长期状态”。
+  3. 将 `ATTN_CONTEXT_VALUE_TILE_LOOP` 的 `II` 从 `4` 继续放宽到 `6`。
+  4. 重写 `dot_product_128_fp(...)`，去掉 `lane_products[128]` 临时数组，改成显式 `8-lane chunk` 归约树，清除新的临时 RAM 反馈环。
+
+### 阶段性效果
+- 这些修改后，full-context flow 不再在 `allocate` 初期快速报同类 `SCHD-3`。
+- 最新完整日志：`work/tmp/catapult_formal_attention_context_full_20260320.log`
+- 最新监控日志：`work/tmp/catapult_formal_attention_context_full_20260320_monitor.log`
+- 代表性指标已经稳定在较低内存平台：
+  1. `assembly` 完成：`Total ops = 3580, Real ops = 274, Vars = 584`
+  2. `architect` 完成：`Total ops = 34306, Real ops = 1518, Vars = 5297`
+  3. `allocate` 阶段长时间运行时，日志内存稳定在约 `2577368kB`，峰值约 `2608500kB`
+
+### 当前真实状态
+- 当前已经不再是“立即失败的 schedule 闭环”，而是：
+  1. `allocate` 可以稳定进入并持续运行数百秒以上。
+  2. 在手工中断前，没有再出现此前 value-stage 的快速 `SCHD-3` 终止。
+  3. 日志可见多个关键 loop 已经被 `Prescheduled`，说明 Catapult 已经开始对修复后的 value-stage 进行长期调度搜索，而不是卡死在同一条反馈环上。
+
+### 当前判断
+- 根因修复方向是正确的：
+  1. 原先导致快速失败的 `head_state_accum` / `tile_accum` / `lane_products` RAM 反馈链已被逐层拔掉。
+  2. 当前阻塞已经从“错误型 schedule failure”转成“设计图仍偏厚，allocate 搜索时间过长”。
+- 因此下一步主线不再是继续修同类 `SCHD-3`，而是进一步压缩 stage 内部设计图规模，重点应放在：
+  1. 将 `ContextScorePacket` 等局部状态从全 `kNumAttentionHeads` 宽度继续收窄到实际 `head-group` 宽度。
+  2. 减少 `prefill_attention_context_value_stream_stage_fp/core` 内仍保留的宽 packet 与 orchestration 扇出。
+  3. 优先降低 `assembly`/`architect` 的 `Real ops`，避免 `allocate` 在当前规模上做超长时间搜索。
