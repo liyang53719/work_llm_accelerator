@@ -298,6 +298,45 @@
   2. 尽量把 head-group 独立性继续前推到 score/value 交界处
   3. 避免重新引入新的整 token 或全 head 宽中间对象
 
+## 2026-03-21 context score/value 交界继续收缩：max_score 改成 head-group 流
+
+### 本轮动作
+- 继续沿着“12 个 head 独立、head-group 内做流水”的方向，把 full-context 主路径上 score 到 value 的交界从整 query 宽 `ContextScorePacket` 收缩到 head-group 粒度。
+- `stream_context_score_word_channel(...)` 不再按整 query 宽 score packet 转发，而是只转发当前实现实际消费的 head-group score word 流。
+- `prefill_attention_context_score_stream_stage_fp_core(...)` 中移除整 query 的 `ContextScorePacket max_score_packet` 物化；每完成一个 `head_base` 组后，立即生成并写出一个 `ContextHeadGroupScorePacket`。
+- `prefill_attention_context_query_value_fp(...)` 不再从整 query `max_score_packet` 中切片，而是按 head-group 顺序直接从 `max_score_word_chan` 读取对应的 `ContextHeadGroupScorePacket`。
+- `prefill_attention_context_value_stream_stage_fp(...)` 中移除本地整 query `ContextScorePacket` 重组逻辑，value-stage 直接消费 score-stage 输出的 head-group score 流。
+
+### 设计意图
+- 上一轮虽然已经去掉了 value 末端的完整 `ContextTokenPacket` 中间态，但 score/value 两段之间仍保留了一个完整 12-head 宽的 `ContextScorePacket`。
+- 对 value-stage 来说，它实际每次只消费一个 head-group 的 `max_score`；先组整包、再拆回 group 只会继续给 Catapult 引入多余状态和跨段连线。
+- 本轮目标就是把 head-group 独立性再往前推一步，让 `max_score` 也做到“按 group 生产、按 group 消费”。
+
+### 本轮验证
+- 使用 full-context top：`qwen_prefill_attention_context_query_tile_stream_catapult`
+- 运行命令：
+  `QWEN_CONTEXT_SOLUTION_NAME=qwen_prefill_attention_context_query_tile_stream_catapult_reduce_ops_v8 QWEN_CONTEXT_TOP_FUNCTION=qwen_prefill_attention_context_query_tile_stream_catapult make catapult_prefill_attention_context`
+- 关键结果：
+  1. `assembly`: `Total ops = 2581, Real ops = 202, Vars = 585`
+  2. `loops`: `Total ops = 4627, Real ops = 190, Vars = 915`
+  3. `architect`: `Total ops = 6261, Real ops = 554, Vars = 1258`
+  4. `architect` 常驻内存：`1754176kB`
+  5. `architect` 峰值内存：`1918028kB`
+- 相对上一轮已提交稳定基线 `v7`：
+  1. `assembly Real ops`: `204 -> 202`
+  2. `architect Real ops`: `608 -> 554`
+  3. `architect` 常驻内存：`1795008kB -> 1754176kB`
+  4. `loops Real ops`: `190`，说明 score/value 主热路径继续收缩
+- `allocate` 已稳定进入长跑区间；在 `120s` 观察窗内未出现新错误，日志内存平台保持在 `1754176kB`，因此本轮同样在拿到足够比较数据后停止继续等待 `extract`。
+
+### 当前判断
+- 这一轮收益明显大于上一轮 value 输出收缩，说明 score/value 交界上的“整 query 宽 max_score 状态”确实还是一个更实质的复杂度来源。
+- `architect Real ops` 从 `608` 直接降到 `554`，说明当前最有效的方向仍然不是继续做外围包装，而是继续消灭热路径中的全头宽中间对象。
+- 下一步应继续沿着这条路径推进：
+  1. 检查 value-stage 内部是否还有可以继续按 head-group 流化的跨 key-tile 状态
+  2. 复查 score-only export/top 路径里遗留的整 `ContextScorePacket` 使用，避免后续重新把全头宽状态带回来
+  3. 在保持当前 `v8` 为可提交 checkpoint 的前提下，再看是否能继续把 `architect Real ops` 往 `500` 以下压
+
 ## 2026-03-18 真正的边界重构：score/value child-top 去掉 k_proj/v_proj 裸指针
 
 ### 本轮动作
