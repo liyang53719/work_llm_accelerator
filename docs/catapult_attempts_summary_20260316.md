@@ -1,5 +1,25 @@
 # Catapult 尝试成败总结（截至 2026-03-16）
 
+## 2026-03-22 进展补记
+1. attention-only stream top 已成功跑通到 extract（成功）
+- 入口：`make catapult_prefill_attention_stream`
+- 动作：新增 `qwen_prefill_attention_stream_top_catapult`，把 attention 顶层数据边界改为 `ac_channel`，并把单包宽度约束在 `<=256bit`。
+- 关键修复：
+	- 去掉 attention kernel raw-array overload 的早退，清掉 `NL-21`。
+	- 去掉 raw-array helper 上不合理的 ccore/top 边界，清掉 `ASM-83`、`CRD-1`、`1819-D`、`CIN-63`、`CIN-393`。
+	- 去掉 stream top 顶层 `#pragma hls_pipeline_init_interval 1`，解除 `architect` 阶段的 `SCHD-3` 顶层反馈路径失败。
+	- 把 stream Tcl 中 `/Flows/SCVerify/USE_CCS_BLOCK` 改为 `false`，清掉顶层 `CCS_BLOCK` 噪声告警。
+- 结果：flow 已完成 `compile/assembly/architect/extract`，最终 QoR 记录为：latency `80709`、throughput `80710`、area `2808.1683`、slack `-0.7745ns`。
+
+2. stream-top 剩余告警已收敛，但不代表架构正确（结论性经验）
+- 当前保留告警主要是：`LOOP-26`、`MEM-66`。
+- 更关键的问题不是这些告警本身，而是该 top 仍采用“channel boundary + local full buffers + old whole-array attention kernel”的组合。
+- 结论：这条路径已证明 `attention-only stream top` 可以拿到第一版 RTL，但它仍是接口验证用过渡方案，不符合最新的 SRAM / working-set 定义。
+
+3. Makefile 主入口已收敛（成功）
+- 动作：移除 `catapult_prefill_attention_context`、`catapult_prefill_attention_kv_cache`、`catapult_prefill_attention_q_context_output` 三个旧的 attention 子阶段目标。
+- 结果：Makefile 只保留 `make catapult_prefill` 与 `make catapult_prefill_attention_stream` 两个主入口，避免把 attention-only stream top 与历史子阶段调试入口混在一起。
+
 ## 2026-03-18 进展补记
 1. context 路径继续按层收窄 helper 边界（进行中）
 - 动作：已把 `score/context` 从 packet helper 继续下沉到 `per-key` helper，本轮再把 `head group` 的 init/compute/store 收成单独包装块，保持 query 级入口只负责调度。
