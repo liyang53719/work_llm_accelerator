@@ -1,6 +1,6 @@
 #include "../common/llm_accel_types.h"
 #include "../common/qwen2_model_config.h"
-#include "../include/ac_channel.h"
+#include <ac_channel.h>
 #include "qwen_catapult_fp.h"
 
 #ifdef __SYNTHESIS__
@@ -21,7 +21,6 @@ using catapult_fp_t = llm_accel::prefill_catapult_fp_t;
 constexpr int kKvWidth = llm_accel::kNumKeyValueHeads * llm_accel::kHeadDim;
 constexpr int kParallelMacLaneCount = llm_accel::kAttentionMacCols;
 constexpr int kRmsNormChunkCount = llm_accel::kHiddenSize / kParallelMacLaneCount;
-
 #define HLS_DO_1(M, base) M(base)
 #define HLS_DO_2(M, base) HLS_DO_1(M, base) M((base) + 1)
 #define HLS_DO_4(M, base) HLS_DO_2(M, base) HLS_DO_2(M, (base) + 2)
@@ -224,7 +223,7 @@ catapult_fp_t weighted_chunk_dot_64_fp(
     int lane_extent) {
   catapult_fp_t lane_products[kParallelMacLaneCount];
 
-#pragma hls_unroll yes
+#pragma hls_unroll no
   for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
     if (lane < lane_extent) {
       lane_products[lane] = fp_mul_op(
@@ -442,9 +441,10 @@ void load_kv_fp_tile_packet(
     int base,
     int extent,
     KvFpTilePacket* packet) {
-  for (int index = 0; index < kKvTileCapacity; ++index) {
-    packet->data[index] = index < extent ? source[base + index] : prefill_catapult_fp_t(0.0f);
-  }
+#define LOAD_KV_FP_TILE(index) \
+  packet->data[index] = (index) < extent ? source[base + (index)] : prefill_catapult_fp_t(0.0f);
+  HLS_DO_64(LOAD_KV_FP_TILE, 0)
+#undef LOAD_KV_FP_TILE
 }
 
 void load_kv_packed_weight_tile_pair_packet(
@@ -478,15 +478,16 @@ void load_kv_scale_tile_pair_packet(
     int out_extent,
     KvScaleTilePacket* k_packet,
     KvScaleTilePacket* v_packet) {
-  for (int index = 0; index < kKvTileCapacity; ++index) {
-    if (index < out_extent) {
-      k_packet->data[index] = k_scales[out_base + index];
-      v_packet->data[index] = v_scales[out_base + index];
-    } else {
-      k_packet->data[index] = prefill_catapult_fp_t(0.0f);
-      v_packet->data[index] = prefill_catapult_fp_t(0.0f);
-    }
+#define LOAD_KV_SCALE_TILE(index)                                                           \
+  if ((index) < out_extent) {                                                               \
+    k_packet->data[index] = k_scales[out_base + (index)];                                   \
+    v_packet->data[index] = v_scales[out_base + (index)];                                   \
+  } else {                                                                                  \
+    k_packet->data[index] = prefill_catapult_fp_t(0.0f);                                    \
+    v_packet->data[index] = prefill_catapult_fp_t(0.0f);                                    \
   }
+  HLS_DO_64(LOAD_KV_SCALE_TILE, 0)
+#undef LOAD_KV_SCALE_TILE
 }
 
 void init_kv_partial_tile_pair_packet(
@@ -496,15 +497,16 @@ void init_kv_partial_tile_pair_packet(
     int out_extent,
     KvPartialTilePacket* k_packet,
     KvPartialTilePacket* v_packet) {
-  for (int index = 0; index < kKvTileCapacity; ++index) {
-    if (index < out_extent) {
-      k_packet->data[index] = k_bias[out_base + index];
-      v_packet->data[index] = v_bias[out_base + index];
-    } else {
-      k_packet->data[index] = prefill_catapult_fp_t(0.0f);
-      v_packet->data[index] = prefill_catapult_fp_t(0.0f);
-    }
+#define INIT_KV_PARTIAL_TILE(index)                                                         \
+  if ((index) < out_extent) {                                                               \
+    k_packet->data[index] = k_bias[out_base + (index)];                                     \
+    v_packet->data[index] = v_bias[out_base + (index)];                                     \
+  } else {                                                                                  \
+    k_packet->data[index] = prefill_catapult_fp_t(0.0f);                                    \
+    v_packet->data[index] = prefill_catapult_fp_t(0.0f);                                    \
   }
+  HLS_DO_64(INIT_KV_PARTIAL_TILE, 0)
+#undef INIT_KV_PARTIAL_TILE
 }
 
 void store_kv_partial_tile_pair_packet(
@@ -514,28 +516,13 @@ void store_kv_partial_tile_pair_packet(
     prefill_catapult_fp_t* k_proj_token,
     prefill_catapult_fp_t* v_proj_token,
     int out_base) {
-  for (int index = 0; index < out_extent; ++index) {
-    k_proj_token[out_base + index] = k_packet.data[index];
-    v_proj_token[out_base + index] = v_packet.data[index];
+#define STORE_KV_PARTIAL_TILE(index)              \
+  if ((index) < out_extent) {                     \
+    k_proj_token[out_base + (index)] = k_packet.data[index]; \
+    v_proj_token[out_base + (index)] = v_packet.data[index]; \
   }
-}
-
-void load_kv_fp_word_packet(
-    const prefill_catapult_fp_t* source,
-    int base,
-    KvFpWordPacket* packet) {
-  for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
-    packet->data[index] = source[base + index];
-  }
-}
-
-void store_kv_fp_word_packet(
-    const KvFpWordPacket& packet,
-    prefill_catapult_fp_t* destination,
-    int base) {
-  for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
-    destination[base + index] = packet.data[index];
-  }
+  HLS_DO_64(STORE_KV_PARTIAL_TILE, 0)
+#undef STORE_KV_PARTIAL_TILE
 }
 
 void load_kv_packed_word_packet(
@@ -561,7 +548,11 @@ void read_kv_fp_tile_packet(
     KvFpTilePacket* packet) {
   for (int word_index = 0; word_index < kKvFpWordCount; ++word_index) {
     const KvFpWordPacket word_packet = channel.read();
-    store_kv_fp_word_packet(word_packet, packet->data, word_index * kMaxFpWordsPerBeat);
+
+#pragma hls_unroll yes
+    for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+      packet->data[word_index * kMaxFpWordsPerBeat + index] = word_packet.data[index];
+    }
   }
 }
 
@@ -570,7 +561,25 @@ void read_kv_fp_tile_words(
     prefill_catapult_fp_t* destination) {
   for (int word_index = 0; word_index < kKvFpWordCount; ++word_index) {
     const KvFpWordPacket word_packet = channel.read();
-    store_kv_fp_word_packet(word_packet, destination, word_index * kMaxFpWordsPerBeat);
+
+#pragma hls_unroll yes
+    for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+      destination[word_index * kMaxFpWordsPerBeat + index] = word_packet.data[index];
+    }
+  }
+}
+
+template <typename PacketType>
+void read_kv_fp_tile_words(
+    ac_channel<KvFpWordPacket>& channel,
+    PacketType& packet) {
+  for (int word_index = 0; word_index < kKvFpWordCount; ++word_index) {
+    const KvFpWordPacket word_packet = channel.read();
+
+#pragma hls_unroll yes
+    for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+      packet.data[word_index * kMaxFpWordsPerBeat + index] = word_packet.data[index];
+    }
   }
 }
 
@@ -579,7 +588,12 @@ void write_kv_fp_tile_packet(
     ac_channel<KvFpWordPacket>& channel) {
   for (int word_index = 0; word_index < kKvFpWordCount; ++word_index) {
     KvFpWordPacket word_packet;
-    load_kv_fp_word_packet(packet.data, word_index * kMaxFpWordsPerBeat, &word_packet);
+
+#pragma hls_unroll yes
+    for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+      word_packet.data[index] = packet.data[word_index * kMaxFpWordsPerBeat + index];
+    }
+
     channel.write(word_packet);
   }
 }
@@ -589,7 +603,28 @@ void write_kv_fp_tile_words(
     ac_channel<KvFpWordPacket>& channel) {
   for (int word_index = 0; word_index < kKvFpWordCount; ++word_index) {
     KvFpWordPacket word_packet;
-    load_kv_fp_word_packet(source, word_index * kMaxFpWordsPerBeat, &word_packet);
+
+#pragma hls_unroll yes
+    for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+      word_packet.data[index] = source[word_index * kMaxFpWordsPerBeat + index];
+    }
+
+    channel.write(word_packet);
+  }
+}
+
+template <typename PacketType>
+void write_kv_fp_tile_words(
+    const PacketType& packet,
+    ac_channel<KvFpWordPacket>& channel) {
+  for (int word_index = 0; word_index < kKvFpWordCount; ++word_index) {
+    KvFpWordPacket word_packet;
+
+#pragma hls_unroll yes
+    for (int index = 0; index < kMaxFpWordsPerBeat; ++index) {
+      word_packet.data[index] = packet.data[word_index * kMaxFpWordsPerBeat + index];
+    }
+
     channel.write(word_packet);
   }
 }
@@ -613,8 +648,10 @@ void qwen_prefill_attention_kv_tile_array_core(
     const prefill_catapult_fp_t v_scales_tile[kKvTileCapacity],
     int lane_extent,
     int out_extent,
-    prefill_catapult_fp_t k_partial_sum_tile[kKvTileCapacity],
-    prefill_catapult_fp_t v_partial_sum_tile[kKvTileCapacity]) {
+  const prefill_catapult_fp_t k_partial_sum_tile_in[kKvTileCapacity],
+  const prefill_catapult_fp_t v_partial_sum_tile_in[kKvTileCapacity],
+  prefill_catapult_fp_t k_partial_sum_tile_out[kKvTileCapacity],
+  prefill_catapult_fp_t v_partial_sum_tile_out[kKvTileCapacity]) {
 #ifdef __SYNTHESIS__
   catapult_fp_t normalized_input_tile[kKvTileCapacity];
 
@@ -628,31 +665,40 @@ void qwen_prefill_attention_kv_tile_array_core(
     }
   }
 
+#pragma hls_unroll yes
+  for (int out_offset = 0; out_offset < kKvTileCapacity; ++out_offset) {
+    k_partial_sum_tile_out[out_offset] = k_partial_sum_tile_in[out_offset];
+    v_partial_sum_tile_out[out_offset] = v_partial_sum_tile_in[out_offset];
+  }
+
 #pragma hls_unroll no
 #pragma hls_pipeline_init_interval 2
   for (int out_offset = 0; out_offset < kKvTileCapacity; ++out_offset) {
-    if (out_offset < out_extent) {
-      k_partial_sum_tile[out_offset] = fp_add_op(
-          k_partial_sum_tile[out_offset],
-          weighted_chunk_dot_64_fp(
-              normalized_input_tile,
-              k_packed_weights_tile,
-              k_scales_tile,
-              out_offset,
-              0,
-              kKvTileCapacity,
-              lane_extent));
-      v_partial_sum_tile[out_offset] = fp_add_op(
-          v_partial_sum_tile[out_offset],
-          weighted_chunk_dot_64_fp(
-              normalized_input_tile,
-              v_packed_weights_tile,
-              v_scales_tile,
-              out_offset,
-              0,
-              kKvTileCapacity,
-              lane_extent));
-    }
+    k_partial_sum_tile_out[out_offset] = fp_add_op(
+        k_partial_sum_tile_in[out_offset],
+        weighted_chunk_dot_64_fp(
+            normalized_input_tile,
+            k_packed_weights_tile,
+            k_scales_tile,
+            out_offset,
+            0,
+            kKvTileCapacity,
+            lane_extent));
+  }
+
+#pragma hls_unroll no
+#pragma hls_pipeline_init_interval 2
+  for (int out_offset = 0; out_offset < kKvTileCapacity; ++out_offset) {
+    v_partial_sum_tile_out[out_offset] = fp_add_op(
+        v_partial_sum_tile_in[out_offset],
+        weighted_chunk_dot_64_fp(
+            normalized_input_tile,
+            v_packed_weights_tile,
+            v_scales_tile,
+            out_offset,
+            0,
+            kKvTileCapacity,
+            lane_extent));
   }
 #else
   (void)input_tile;
@@ -664,13 +710,15 @@ void qwen_prefill_attention_kv_tile_array_core(
   (void)v_scales_tile;
   (void)lane_extent;
   (void)out_extent;
-  (void)k_partial_sum_tile;
-  (void)v_partial_sum_tile;
+  (void)k_partial_sum_tile_in;
+  (void)v_partial_sum_tile_in;
+  (void)k_partial_sum_tile_out;
+  (void)v_partial_sum_tile_out;
 #endif
 }
 
 #pragma hls_design top
-#pragma hls_pipeline_init_interval 1
+#pragma hls_pipeline_init_interval 2
 #pragma hls_resource inv_rms:rsc variables="inv_rms" map_to_module="[DirectInput]"
 #pragma hls_resource lane_extent:rsc variables="lane_extent" map_to_module="[DirectInput]"
 #pragma hls_resource out_extent:rsc variables="out_extent" map_to_module="[DirectInput]"
@@ -695,17 +743,19 @@ void qwen_prefill_attention_kv_tile_stream_catapult(
   KvPackedTilePacket v_packed_weight_tile_packet;
   KvScaleTilePacket k_scale_tile_packet;
   KvScaleTilePacket v_scale_tile_packet;
-  KvPartialTilePacket k_partial_sum_tile_packet;
-  KvPartialTilePacket v_partial_sum_tile_packet;
+  KvPartialTilePacket k_partial_sum_tile_in_packet;
+  KvPartialTilePacket v_partial_sum_tile_in_packet;
+  KvPartialTilePacket k_partial_sum_tile_out_packet;
+  KvPartialTilePacket v_partial_sum_tile_out_packet;
 
   read_kv_fp_tile_packet(input_tile_chan, &input_tile_packet);
   read_kv_fp_tile_packet(input_layernorm_weight_tile_chan, &input_layernorm_weight_tile_packet);
   read_kv_packed_tile_packet(k_packed_weight_tile_chan, &k_packed_weight_tile_packet);
   read_kv_packed_tile_packet(v_packed_weight_tile_chan, &v_packed_weight_tile_packet);
-  read_kv_fp_tile_words(k_scale_tile_chan, k_scale_tile_packet.data);
-  read_kv_fp_tile_words(v_scale_tile_chan, v_scale_tile_packet.data);
-  read_kv_fp_tile_words(k_partial_sum_tile_in_chan, k_partial_sum_tile_packet.data);
-  read_kv_fp_tile_words(v_partial_sum_tile_in_chan, v_partial_sum_tile_packet.data);
+  read_kv_fp_tile_words(k_scale_tile_chan, k_scale_tile_packet);
+  read_kv_fp_tile_words(v_scale_tile_chan, v_scale_tile_packet);
+  read_kv_fp_tile_words(k_partial_sum_tile_in_chan, k_partial_sum_tile_in_packet);
+  read_kv_fp_tile_words(v_partial_sum_tile_in_chan, v_partial_sum_tile_in_packet);
 
   qwen_prefill_attention_kv_tile_array_core(
       input_tile_packet.data,
@@ -717,11 +767,13 @@ void qwen_prefill_attention_kv_tile_stream_catapult(
       v_scale_tile_packet.data,
       lane_extent,
       out_extent,
-      k_partial_sum_tile_packet.data,
-      v_partial_sum_tile_packet.data);
+        k_partial_sum_tile_in_packet.data,
+        v_partial_sum_tile_in_packet.data,
+        k_partial_sum_tile_out_packet.data,
+        v_partial_sum_tile_out_packet.data);
 
-  write_kv_fp_tile_words(k_partial_sum_tile_packet.data, k_partial_sum_tile_out_chan);
-  write_kv_fp_tile_words(v_partial_sum_tile_packet.data, v_partial_sum_tile_out_chan);
+      write_kv_fp_tile_words(k_partial_sum_tile_out_packet, k_partial_sum_tile_out_chan);
+      write_kv_fp_tile_words(v_partial_sum_tile_out_packet, v_partial_sum_tile_out_chan);
 #else
   (void)input_tile_chan;
   (void)input_layernorm_weight_tile_chan;
@@ -787,6 +839,8 @@ ATNN_KV_STREAM_LOOP:
         KvScaleTilePacket v_scale_tile_packet;
         KvPartialTilePacket k_partial_sum_tile_packet;
         KvPartialTilePacket v_partial_sum_tile_packet;
+        KvPartialTilePacket k_partial_sum_tile_next_packet;
+        KvPartialTilePacket v_partial_sum_tile_next_packet;
 
         load_kv_scale_tile_pair_packet(
             k_scales,
@@ -833,7 +887,15 @@ ATNN_KV_STREAM_LOOP:
               in_extent,
               out_extent,
               k_partial_sum_tile_packet.data,
-              v_partial_sum_tile_packet.data);
+              v_partial_sum_tile_packet.data,
+              k_partial_sum_tile_next_packet.data,
+              v_partial_sum_tile_next_packet.data);
+
+#pragma hls_unroll yes
+          for (int out_offset = 0; out_offset < kKvTileCapacity; ++out_offset) {
+            k_partial_sum_tile_packet.data[out_offset] = k_partial_sum_tile_next_packet.data[out_offset];
+            v_partial_sum_tile_packet.data[out_offset] = v_partial_sum_tile_next_packet.data[out_offset];
+          }
         }
 
         store_kv_partial_tile_pair_packet(

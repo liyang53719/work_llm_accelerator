@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../catapult_shims/cstdint.h"
+#include <cstdint>
 
 #include "llm_accel_types.h"
 #include "qwen2_model_config.h"

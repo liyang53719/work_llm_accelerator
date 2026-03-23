@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../include/ac_channel.h"
+#include <ac_channel.h>
 
 #include "../common/llm_accel_types.h"
 #include "../common/qwen2_model_config.h"

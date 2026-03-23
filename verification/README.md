@@ -64,6 +64,7 @@
 ## 当前补充
 
 - `hls/build_host_wrappers.sh` 可先编译 prefill/decode 的 host-side stub shared library，用于 ABI 冒烟和后续 ctypes 接入。
+- `hls/build_host_wrappers.sh` 中的 `ac_channel.h` 必须解析到 Catapult 自带的 `Mgc_home/shared/include/ac_channel.h`；仓库内本地副本方案已弃用，不再作为备选路径。
 - `hls/build_host_wrappers.sh` 现在还会编译一个 C++ layer0 prefill reference wrapper，用于把 prefill host wrapper 从 identity stub 推向真实数学路径。
 - `hls/build_host_wrappers.sh` 现在也会编译一个 C++ layer0 decode-step reference wrapper，用于把 decode host wrapper 推向真实数学路径。
 - 当前 shared library 仍然只是接口骨架，不代表已经实现 Qwen2.5-1.5B 的整网数学路径。
@@ -74,3 +75,4 @@
 - `validate_layer_dispatch_layout.py` 用来锁定 layer 复用和 DDR 地址口径，避免在进入 AXI top-level 之前继续扩 layer-specific 参数接口。
 - `manual_dispatch_backend.py` 和 `validate_all_layer_manual_dispatch.py` 用来证明“单层 layer 路径可通过 layer loop 复用到 28 层”，这是后续 descriptor + top wrapper 方案成立的前提。
 - `descriptor_dispatch_backend.py` 和 `validate_all_layer_descriptor_dispatch.py` 进一步把这件事落到 descriptor 口径上，确保后续 top wrapper 与 software scheduling 不会在层编号和地址布局上分叉。
+- `validate_prefill_glue_smoke.py` 当前默认把 “direct software chain vs glue wrapper” 作为主判定口径；Python reference 仍保留为可选交叉检查，而不是默认放行条件。

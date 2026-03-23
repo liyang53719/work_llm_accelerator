@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../include/ac_channel.h"
+#include <ac_channel.h>
 
 #include "qwen_prefill_attention_kernel.h"
 #include "qwen_prefill_stream_types.h"

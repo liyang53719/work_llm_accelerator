@@ -1,5 +1,5 @@
 #include "qwen_prefill_attention_kernel.h"
-#include "../include/ac_channel.h"
+#include <ac_channel.h>
 
 #ifdef __SYNTHESIS__
 #include "../include/ac_int.h"
@@ -1404,6 +1404,14 @@ struct HiddenProjFpTilePacket {
   prefill_catapult_fp_t data[kProjectionTileCapacity];
 };
 
+inline prefill_catapult_fp_t hidden_proj_fp_zero() {
+  return prefill_catapult_fp_t(0.0f);
+}
+
+inline prefill_catapult_fp_t hidden_proj_fp_one() {
+  return prefill_catapult_fp_t(1.0f);
+}
+
 struct HiddenProjPackedWeightTilePacket {
   packed_w4_t data[kProjectionTileCapacity * kProjectionTileCapacity / 2];
 };
@@ -1523,9 +1531,9 @@ void init_hidden_proj_partial_tile_packet(
 #pragma hls_unroll no
   for (int index = 0; index < kProjectionTileCapacity; ++index) {
     if (index < out_extent) {
-      packet->data[index] = bias == nullptr ? fp_zero() : bias[out_base + index];
+      packet->data[index] = bias == nullptr ? hidden_proj_fp_zero() : bias[out_base + index];
     } else {
-      packet->data[index] = fp_zero();
+      packet->data[index] = hidden_proj_fp_zero();
     }
   }
 }
@@ -1677,7 +1685,7 @@ void project_hidden_token_tilewise_fp(
     HiddenProjScaleTilePacket scale_tile_packet;
     HiddenProjPartialTilePacket partial_sum_tile_packet;
     HiddenProjPartialTilePacket partial_sum_tile_next_packet;
-    const prefill_catapult_fp_t effective_inv_rms = apply_rmsnorm ? inv_rms : fp_one();
+    const prefill_catapult_fp_t effective_inv_rms = apply_rmsnorm ? inv_rms : hidden_proj_fp_one();
 
     load_hidden_proj_scale_tile_packet(scales, out_base, out_extent, &scale_tile_packet);
     init_hidden_proj_partial_tile_packet(bias, out_base, out_extent, &partial_sum_tile_packet);
@@ -1805,7 +1813,7 @@ void qwen_prefill_attention_q_context_output_tile_stream_catapult(
   HiddenProjScaleTilePacket scale_tile_packet;
   HiddenProjPartialTilePacket partial_sum_tile_in_packet;
   HiddenProjPartialTilePacket partial_sum_tile_out_packet;
-  const prefill_catapult_fp_t effective_inv_rms = apply_rmsnorm ? inv_rms : fp_one();
+  const prefill_catapult_fp_t effective_inv_rms = apply_rmsnorm ? inv_rms : hidden_proj_fp_one();
 
   read_hidden_proj_fp_tile_packet(input_tile_chan, &input_tile_packet);
   mask_hidden_proj_input_tile_packet(lane_extent, &input_tile_packet);
@@ -2448,7 +2456,7 @@ ATTN_OUTPUT_LOOP:
           o_packed_weights,
           nullptr,
           o_scales,
-          fp_zero(),
+          hidden_proj_fp_zero(),
           tile_config.hidden_proj,
           false,
           output_token);
@@ -2496,7 +2504,7 @@ ATTN_CONTEXT_OUTPUT_LOOP:
           o_packed_weights,
           nullptr,
           o_scales,
-          fp_zero(),
+          hidden_proj_fp_zero(),
           tile_config.hidden_proj,
           false,
           output_token);
@@ -2530,7 +2538,7 @@ INIT_Q_CONTEXT_OUTPUT_BUFFER:
 ZERO_Q_CONTEXT_OUTPUT_TOKEN:
 #pragma hls_unroll no
     for (int dim = 0; dim < kHiddenSize; ++dim) {
-      output_sequence[token_index * kHiddenSize + dim] = fp_zero();
+      output_sequence[token_index * kHiddenSize + dim] = hidden_proj_fp_zero();
     }
   }
 
@@ -2589,7 +2597,7 @@ ATNN_Q_CONTEXT_OUTPUT_LOOP:
           o_packed_weights,
           nullptr,
           o_scales,
-          fp_zero(),
+          hidden_proj_fp_zero(),
           tile_config.hidden_proj,
           false,
           output_token);

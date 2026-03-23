@@ -1,51 +1,51 @@
 #pragma once
 
-#include "../catapult_shims/cstddef.h"
-#include "../catapult_shims/cstdint.h"
+#include <cstdint>
 
 #include "qwen2_model_config.h"
 
 namespace llm_accel {
 
-constexpr std::size_t kSramBudgetBytes = 1U << 20;
-constexpr std::size_t kWeightBufferBytes = 256U << 10;
-constexpr std::size_t kKvWorkingSetBytes = 256U << 10;
-constexpr std::size_t kPartialSumBytes = 128U << 10;
-constexpr std::size_t kSoftmaxScratchBytes = 128U << 10;
-constexpr std::size_t kControlScratchBytes =
+constexpr std::uint64_t kSramBudgetBytes = 1ULL << 20;
+constexpr std::uint64_t kWeightBufferBytes = 256ULL << 10;
+constexpr std::uint64_t kKvWorkingSetBytes = 256ULL << 10;
+constexpr std::uint64_t kPartialSumBytes = 128ULL << 10;
+constexpr std::uint64_t kSoftmaxScratchBytes = 128ULL << 10;
+constexpr std::uint64_t kControlScratchBytes =
     kSramBudgetBytes - kWeightBufferBytes - kKvWorkingSetBytes - kPartialSumBytes - kSoftmaxScratchBytes;
 
-constexpr std::size_t kPackedWeightBytesPerLayer =
-    static_cast<std::size_t>(kHiddenSize) * (kHiddenSize + 2 * kNumKeyValueHeads * kHeadDim + kIntermediateSize + kHiddenSize) / 2;
+constexpr std::uint64_t kPackedWeightBytesPerLayer =
+    static_cast<std::uint64_t>(kHiddenSize) *
+    static_cast<std::uint64_t>(kHiddenSize + 2 * kNumKeyValueHeads * kHeadDim + kIntermediateSize + kHiddenSize) / 2ULL;
 
-constexpr std::size_t kNormWeightBytesPerLayer =
-    2U * static_cast<std::size_t>(kHiddenSize) * sizeof(float);
+constexpr std::uint64_t kNormWeightBytesPerLayer =
+    2ULL * static_cast<std::uint64_t>(kHiddenSize) * sizeof(float);
 
-constexpr std::size_t kQWeightBytes =
-  static_cast<std::size_t>(kHiddenSize) * static_cast<std::size_t>(kHiddenSize) / 2U;
-constexpr std::size_t kKWeightBytes =
-  static_cast<std::size_t>(kHiddenSize) * static_cast<std::size_t>(kNumKeyValueHeads * kHeadDim) / 2U;
-constexpr std::size_t kVWeightBytes = kKWeightBytes;
-constexpr std::size_t kOWeightBytes = kQWeightBytes;
-constexpr std::size_t kGateWeightBytes =
-  static_cast<std::size_t>(kHiddenSize) * static_cast<std::size_t>(kIntermediateSize) / 2U;
-constexpr std::size_t kUpWeightBytes = kGateWeightBytes;
-constexpr std::size_t kDownWeightBytes =
-  static_cast<std::size_t>(kIntermediateSize) * static_cast<std::size_t>(kHiddenSize) / 2U;
+constexpr std::uint64_t kQWeightBytes =
+  static_cast<std::uint64_t>(kHiddenSize) * static_cast<std::uint64_t>(kHiddenSize) / 2ULL;
+constexpr std::uint64_t kKWeightBytes =
+  static_cast<std::uint64_t>(kHiddenSize) * static_cast<std::uint64_t>(kNumKeyValueHeads * kHeadDim) / 2ULL;
+constexpr std::uint64_t kVWeightBytes = kKWeightBytes;
+constexpr std::uint64_t kOWeightBytes = kQWeightBytes;
+constexpr std::uint64_t kGateWeightBytes =
+  static_cast<std::uint64_t>(kHiddenSize) * static_cast<std::uint64_t>(kIntermediateSize) / 2ULL;
+constexpr std::uint64_t kUpWeightBytes = kGateWeightBytes;
+constexpr std::uint64_t kDownWeightBytes =
+  static_cast<std::uint64_t>(kIntermediateSize) * static_cast<std::uint64_t>(kHiddenSize) / 2ULL;
 
-constexpr std::size_t kProjectionScaleBytesPerLayer =
-    static_cast<std::size_t>(3 * kHiddenSize + kIntermediateSize + kHiddenSize) * sizeof(float);
+constexpr std::uint64_t kProjectionScaleBytesPerLayer =
+    static_cast<std::uint64_t>(3 * kHiddenSize + kIntermediateSize + kHiddenSize) * sizeof(float);
 
-constexpr std::size_t kProjectionBiasBytesPerLayer =
-  static_cast<std::size_t>(kHiddenSize + 2 * kNumKeyValueHeads * kHeadDim) * sizeof(float);
+constexpr std::uint64_t kProjectionBiasBytesPerLayer =
+  static_cast<std::uint64_t>(kHiddenSize + 2 * kNumKeyValueHeads * kHeadDim) * sizeof(float);
 
-constexpr std::size_t kLayerParameterBytes =
+constexpr std::uint64_t kLayerParameterBytes =
   kPackedWeightBytesPerLayer + kNormWeightBytesPerLayer + kProjectionBiasBytesPerLayer + kProjectionScaleBytesPerLayer;
 
-constexpr std::size_t kKvElementsPerTokenPerLayer =
-    static_cast<std::size_t>(2 * kNumKeyValueHeads * kHeadDim);
+constexpr std::uint64_t kKvElementsPerTokenPerLayer =
+    static_cast<std::uint64_t>(2 * kNumKeyValueHeads * kHeadDim);
 
-constexpr std::size_t kKvBytesPerTokenPerLayer = kKvElementsPerTokenPerLayer * sizeof(float);
+constexpr std::uint64_t kKvBytesPerTokenPerLayer = kKvElementsPerTokenPerLayer * sizeof(float);
 
 struct LayerParameterLayout {
   std::uint64_t input_layernorm_weight_offset_bytes;

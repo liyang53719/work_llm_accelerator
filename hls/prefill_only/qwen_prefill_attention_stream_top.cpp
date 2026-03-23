@@ -108,7 +108,8 @@ KernelStatus qwen_prefill_attention_stream_top_catapult(
     ac_channel<PrefillStreamFpWordPacket>& k_cache_out_chan,
     ac_channel<PrefillStreamFpWordPacket>& v_cache_out_chan,
     ac_channel<PrefillStreamFpWordPacket>& output_sequence_chan) {
-  const PrefillAttentionTileConfig tile_config = default_prefill_tile_config().attention;
+  PrefillAttentionTileConfig tile_config = default_prefill_tile_config().attention;
+  tile_config.head_dim = kHeadDim;
   if (!valid_attention_stream_config(seq_len)) {
     return {false, 2};
   }

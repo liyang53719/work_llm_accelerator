@@ -8,6 +8,13 @@ tmp/reference_cases/
 tmp/reference_params/
 Catapult/
 Catapult_*/
+rtl_backup/
 catapult.log
 catapult.pinfo
 work/
+command.log
+novas.conf
+novas.rc
+sysBusyP.conf
+sysBusyPLog/
+verdiLog/

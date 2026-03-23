@@ -5,11 +5,11 @@
 
 namespace llm_accel {
 
-constexpr std::size_t kPrefillWeightSramElements = kWeightBufferBytes / sizeof(packed_w4_t);
-constexpr std::size_t kPrefillKvSramElements = kKvWorkingSetBytes / sizeof(scalar_t);
-constexpr std::size_t kPrefillPartialSumSramElements = kPartialSumBytes / sizeof(acc_t);
-constexpr std::size_t kPrefillSoftmaxSramElements = kSoftmaxScratchBytes / sizeof(scalar_t);
-constexpr std::size_t kPrefillControlSramElements = kControlScratchBytes / sizeof(scalar_t);
+constexpr std::uint64_t kPrefillWeightSramElements = kWeightBufferBytes / sizeof(packed_w4_t);
+constexpr std::uint64_t kPrefillKvSramElements = kKvWorkingSetBytes / sizeof(scalar_t);
+constexpr std::uint64_t kPrefillPartialSumSramElements = kPartialSumBytes / sizeof(acc_t);
+constexpr std::uint64_t kPrefillSoftmaxSramElements = kSoftmaxScratchBytes / sizeof(scalar_t);
+constexpr std::uint64_t kPrefillControlSramElements = kControlScratchBytes / sizeof(scalar_t);
 
 KernelStatus qwen_prefill_top_catapult(
     int layer_id,

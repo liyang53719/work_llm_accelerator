@@ -9,13 +9,13 @@ constexpr int kPrefillInvalidPortError = 21;
 constexpr int kPrefillInvalidMemoryWindowError = 22;
 constexpr int kPrefillSequenceCapacity = kDefaultPrefillSeqTile;
 
-constexpr std::size_t kPrefillWeightWindowBytes = kPackedWeightBytesPerLayer;
-constexpr std::size_t kPrefillScaleWindowElements =
+constexpr std::uint64_t kPrefillWeightWindowBytes = kPackedWeightBytesPerLayer;
+constexpr std::uint64_t kPrefillScaleWindowElements =
     (kNormWeightBytesPerLayer + kProjectionBiasBytesPerLayer + kProjectionScaleBytesPerLayer) / sizeof(scalar_t);
-constexpr std::size_t kPrefillKvCacheWindowElements =
-    2U * static_cast<std::size_t>(kPrefillSequenceCapacity) * static_cast<std::size_t>(kNumKeyValueHeads * kHeadDim);
-constexpr std::size_t kPrefillActivationWindowElements =
-    3U * static_cast<std::size_t>(kPrefillSequenceCapacity) * static_cast<std::size_t>(kHiddenSize);
+constexpr std::uint64_t kPrefillKvCacheWindowElements =
+    2ULL * static_cast<std::uint64_t>(kPrefillSequenceCapacity) * static_cast<std::uint64_t>(kNumKeyValueHeads * kHeadDim);
+constexpr std::uint64_t kPrefillActivationWindowElements =
+    3ULL * static_cast<std::uint64_t>(kPrefillSequenceCapacity) * static_cast<std::uint64_t>(kHiddenSize);
 
 KernelStatus qwen_prefill_top_core(
     const PrefillLayerDescriptor& descriptor,
