@@ -393,10 +393,8 @@ void silu_mul_block_128_fp(
     int lane_extent,
     catapult_fp_t* silu_mul) {
 #pragma hls_unroll no
-  for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
-    if (lane < lane_extent) {
-      silu_mul[lane] = fp_mul_op(silu_fp(gate_proj[lane]), up_proj[lane]);
-    }
+  for (int lane = 0; lane < lane_extent; ++lane) {
+    silu_mul[lane] = fp_mul_op(silu_fp(gate_proj[lane]), up_proj[lane]);
   }
 }
 
@@ -497,87 +495,112 @@ MLP_PROJ_STORE_LOOP:
   }
 }
 
+void project_tiled_range_fp(
+    const catapult_fp_t* input_token,
+    const llm_accel::packed_w4_t* packed_weights,
+    const catapult_fp_t* scales,
+    int in_dim,
+    int out_index_base,
+    int out_extent,
+    int in_tile,
+    catapult_fp_t* output_tile) {
+  catapult_fp_t input_tile[kProjectionTileCapacity];
+  catapult_fp_t partial_sum[kProjectionTileCapacity];
+
+MLP_PROJ_RANGE_INIT_LOOP:
+#pragma hls_pipeline_init_interval 1
+  for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+    partial_sum[out_offset] = fp_zero();
+  }
+
+  for (int in_base = 0; in_base < in_dim; in_base += in_tile) {
+    const int in_extent = min_int(in_tile, in_dim - in_base);
+MLP_PROJ_RANGE_LOAD_LOOP:
+#pragma hls_pipeline_init_interval 1
+    for (int in_offset = 0; in_offset < in_extent; ++in_offset) {
+      input_tile[in_offset] = input_token[in_base + in_offset];
+    }
+MLP_PROJ_RANGE_ACCUM_LOOP:
+#pragma hls_pipeline_init_interval 4
+    for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+      const int out_index = out_index_base + out_offset;
+      catapult_fp_t accum = partial_sum[out_offset];
+      for (int in_offset = 0; in_offset < in_extent; in_offset += kParallelMacLaneCount) {
+        const int lane_extent = min_int(kParallelMacLaneCount, in_extent - in_offset);
+        accum = fp_add_op(
+            accum,
+            weighted_chunk_dot_fp(
+                input_tile + in_offset,
+                packed_weights,
+                scales,
+                out_index,
+                in_base + in_offset,
+                in_dim,
+                lane_extent));
+      }
+      partial_sum[out_offset] = accum;
+    }
+  }
+
+MLP_PROJ_RANGE_STORE_LOOP:
+#pragma hls_pipeline_init_interval 1
+  for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+    output_tile[out_offset] = partial_sum[out_offset];
+  }
+}
+
+void down_project_accumulate_tile_fp(
+    const catapult_fp_t* silu_tile,
+    int ff_index_base,
+    int ff_extent,
+    int hidden_tile,
+    bool initialize,
+    const llm_accel::packed_w4_t* down_packed_weights,
+    const catapult_fp_t* down_scales,
+    catapult_fp_t* down_accum) {
+  catapult_fp_t partial_sum[kProjectionTileCapacity];
+
+  for (int out_base = 0; out_base < llm_accel::kHiddenSize; out_base += hidden_tile) {
+    const int out_extent = min_int(hidden_tile, llm_accel::kHiddenSize - out_base);
+MLP_DOWN_ACCUM_INIT_LOOP:
+#pragma hls_pipeline_init_interval 1
+    for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+      partial_sum[out_offset] = initialize ? fp_zero() : down_accum[out_base + out_offset];
+    }
+MLP_DOWN_ACCUM_LOOP:
+#pragma hls_pipeline_init_interval 4
+    for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+      const int out_index = out_base + out_offset;
+      catapult_fp_t accum = partial_sum[out_offset];
+      for (int in_offset = 0; in_offset < ff_extent; in_offset += kParallelMacLaneCount) {
+        const int lane_extent = min_int(kParallelMacLaneCount, ff_extent - in_offset);
+        accum = fp_add_op(
+            accum,
+            weighted_chunk_dot_fp(
+                silu_tile + in_offset,
+                down_packed_weights,
+                down_scales,
+                out_index,
+                ff_index_base + in_offset,
+                llm_accel::kIntermediateSize,
+                lane_extent));
+      }
+      partial_sum[out_offset] = accum;
+    }
+MLP_DOWN_ACCUM_STORE_LOOP:
+#pragma hls_pipeline_init_interval 1
+    for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+      down_accum[out_base + out_offset] = partial_sum[out_offset];
+    }
+  }
+}
+
 inline catapult_fp_t silu_fp(const catapult_fp_t& value) {
   return fp_div_op(value, fp_add_op(fp_one(), approx_exp_fp(fp_sub_op(fp_zero(), value))));
 }
 
 }  // namespace
 
-#ifdef __SYNTHESIS__
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-void qwen_prefill_mlp_gate_up_stage_catapult(
-    const prefill_catapult_fp_t attention_token[kHiddenSize],
-    const PrefillMLPTileConfig& tile_config,
-    const prefill_catapult_fp_t post_attention_layernorm_weight[kHiddenSize],
-    prefill_catapult_fp_t rms_eps,
-  const packed_w4_t gate_packed_weights[kMlpPackedWeightWords],
-  const packed_w4_t up_packed_weights[kMlpPackedWeightWords],
-  const prefill_catapult_fp_t gate_scales[kIntermediateSize],
-  const prefill_catapult_fp_t up_scales[kIntermediateSize],
-    prefill_catapult_fp_t silu_mul[kIntermediateSize]) {
-  prefill_catapult_fp_t post_norm[kHiddenSize];
-  prefill_catapult_fp_t gate_proj[kIntermediateSize];
-  prefill_catapult_fp_t up_proj[kIntermediateSize];
-
-  rmsnorm_token_fp(attention_token, post_attention_layernorm_weight, rms_eps, post_norm);
-  project_tiled_fp(
-      post_norm,
-      gate_packed_weights,
-      gate_scales,
-      kHiddenSize,
-      kIntermediateSize,
-      tile_config.hidden,
-      tile_config.ff,
-      gate_proj);
-  project_tiled_fp(
-      post_norm,
-      up_packed_weights,
-      up_scales,
-      kHiddenSize,
-      kIntermediateSize,
-      tile_config.hidden,
-      tile_config.ff,
-      up_proj);
-MLP_SILU_MUL_LOOP:
-#pragma hls_unroll no
-  for (int index = 0; index < kIntermediateSize; ++index) {
-    silu_mul[index] = fp_mul_op(silu_fp(gate_proj[index]), up_proj[index]);
-  }
-}
-
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-void qwen_prefill_mlp_down_stage_catapult(
-    const prefill_catapult_fp_t attention_token[kHiddenSize],
-    const PrefillMLPTileConfig& tile_config,
-  const packed_w4_t down_packed_weights[kMlpPackedWeightWords],
-  const prefill_catapult_fp_t down_scales[kHiddenSize],
-    const prefill_catapult_fp_t silu_mul[kIntermediateSize],
-    prefill_catapult_fp_t output_token[kHiddenSize]) {
-  prefill_catapult_fp_t down_proj[kHiddenSize];
-
-  project_tiled_fp(
-      silu_mul,
-      down_packed_weights,
-      down_scales,
-      kIntermediateSize,
-      kHiddenSize,
-      tile_config.ff,
-      tile_config.hidden,
-      down_proj);
-MLP_RESIDUAL_ADD_LOOP:
-#pragma hls_pipeline_init_interval 1
-#pragma hls_unroll no
-  for (int base = 0; base < kHiddenSize; base += kParallelMacLaneCount) {
-    const int lane_extent = min_int(kParallelMacLaneCount, kHiddenSize - base);
-    residual_add_128_fp(attention_token + base, down_proj + base, lane_extent, output_token + base);
-  }
-}
-
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 KernelStatus qwen_prefill_mlp_kernel_catapult(
     const prefill_catapult_fp_t attention_residual[kPrefillCatapultSeqCapacity * kHiddenSize],
     int seq_len,
@@ -606,25 +629,55 @@ MLP_TOKEN_LOOP:
       const prefill_catapult_fp_t* attention_token = attention_residual + token_index * kHiddenSize;
       prefill_catapult_fp_t* output_token = output_sequence + token_index * kHiddenSize;
 
-      prefill_catapult_fp_t silu_mul[kIntermediateSize];
+      prefill_catapult_fp_t post_norm[kHiddenSize];
+      prefill_catapult_fp_t down_accum[kHiddenSize];
+      prefill_catapult_fp_t gate_tile[kProjectionTileCapacity];
+      prefill_catapult_fp_t up_tile[kProjectionTileCapacity];
+      prefill_catapult_fp_t silu_tile[kProjectionTileCapacity];
 
-      qwen_prefill_mlp_gate_up_stage_catapult(
-          attention_token,
-          tile_config,
-          post_attention_layernorm_weight,
-          rms_eps,
-          gate_packed_weights,
-          up_packed_weights,
-          gate_scales,
-          up_scales,
-          silu_mul);
-      qwen_prefill_mlp_down_stage_catapult(
-          attention_token,
-          tile_config,
-          down_packed_weights,
-          down_scales,
-          silu_mul,
-          output_token);
+      rmsnorm_token_fp(attention_token, post_attention_layernorm_weight, rms_eps, post_norm);
+
+      for (int ff_base = 0; ff_base < kIntermediateSize; ff_base += tile_config.ff) {
+        const int ff_extent = min_int(tile_config.ff, kIntermediateSize - ff_base);
+        project_tiled_range_fp(
+            post_norm,
+            gate_packed_weights,
+            gate_scales,
+            kHiddenSize,
+            ff_base,
+            ff_extent,
+            tile_config.hidden,
+            gate_tile);
+        project_tiled_range_fp(
+            post_norm,
+            up_packed_weights,
+            up_scales,
+            kHiddenSize,
+            ff_base,
+            ff_extent,
+            tile_config.hidden,
+            up_tile);
+
+        for (int base = 0; base < ff_extent; base += kParallelMacLaneCount) {
+          const int lane_extent = min_int(kParallelMacLaneCount, ff_extent - base);
+          silu_mul_block_128_fp(gate_tile + base, up_tile + base, lane_extent, silu_tile + base);
+        }
+
+        down_project_accumulate_tile_fp(
+            silu_tile,
+            ff_base,
+            ff_extent,
+            tile_config.hidden,
+            ff_base == 0,
+            down_packed_weights,
+            down_scales,
+            down_accum);
+      }
+
+      for (int base = 0; base < kHiddenSize; base += kParallelMacLaneCount) {
+        const int lane_extent = min_int(kParallelMacLaneCount, kHiddenSize - base);
+        residual_add_128_fp(attention_token + base, down_accum + base, lane_extent, output_token + base);
+      }
     }
   }
 
