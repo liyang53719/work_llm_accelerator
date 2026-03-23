@@ -320,7 +320,7 @@ catapult_fp_t approx_exp_fp(const catapult_fp_t& value) {
 
   int half_steps = 0;
   catapult_fp_t scaled = value;
-#pragma hls_unroll yes
+#pragma hls_unroll no
   for (int step = 0; step < 6; ++step) {
     if (!fp_lt_op(scaled, neg_one)) {
       break;
@@ -331,13 +331,13 @@ catapult_fp_t approx_exp_fp(const catapult_fp_t& value) {
 
   catapult_fp_t term = fp_one();
   catapult_fp_t series = fp_one();
-#pragma hls_unroll yes
+#pragma hls_unroll no
   for (int degree = 1; degree <= 6; ++degree) {
     term = fp_mul_op(term, fp_div_op(scaled, fp_const_int(degree)));
     series = fp_add_op(series, term);
   }
 
-#pragma hls_unroll yes
+#pragma hls_unroll no
   for (int step = 0; step < half_steps; ++step) {
     series = fp_mul_op(series, series);
   }
@@ -376,18 +376,15 @@ catapult_fp_t weighted_chunk_dot_fp(
     int in_index_base,
     int in_dim,
     int lane_extent) {
-  catapult_fp_t lane_products[kParallelMacLaneCount];
-#pragma hls_unroll yes
-  for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
-    if (lane < lane_extent) {
-      lane_products[lane] = fp_mul_op(
-          input_tile[lane],
-          dequantized_weight_fp(packed_weights, scales, out_index, in_index_base + lane, in_dim));
-    } else {
-      lane_products[lane] = fp_zero();
-    }
+  catapult_fp_t accum = fp_zero();
+  for (int lane = 0; lane < lane_extent; ++lane) {
+    accum = fp_add_op(
+        accum,
+        fp_mul_op(
+            input_tile[lane],
+            dequantized_weight_fp(packed_weights, scales, out_index, in_index_base + lane, in_dim)));
   }
-  return reduce_sum_128_fp(lane_products);
+  return accum;
 }
 
 void silu_mul_block_128_fp(
@@ -395,7 +392,7 @@ void silu_mul_block_128_fp(
     const catapult_fp_t* up_proj,
     int lane_extent,
     catapult_fp_t* silu_mul) {
-#pragma hls_unroll yes
+#pragma hls_unroll no
   for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
     if (lane < lane_extent) {
       silu_mul[lane] = fp_mul_op(silu_fp(gate_proj[lane]), up_proj[lane]);
@@ -408,7 +405,7 @@ void residual_add_128_fp(
     const catapult_fp_t* down_proj,
     int lane_extent,
     catapult_fp_t* output_token) {
-#pragma hls_unroll yes
+#pragma hls_unroll no
   for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
     if (lane < lane_extent) {
       output_token[lane] = fp_add_op(attention_token[lane], down_proj[lane]);
@@ -422,9 +419,10 @@ void rmsnorm_token_fp(
     const catapult_fp_t& rms_eps,
     catapult_fp_t* output) {
   catapult_fp_t mean_square = fp_zero();
+#pragma hls_unroll no
   for (int base = 0; base < llm_accel::kHiddenSize; base += kParallelMacLaneCount) {
     catapult_fp_t lane_square[kParallelMacLaneCount];
-#pragma hls_unroll yes
+#pragma hls_unroll no
     for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
       const catapult_fp_t value = input[base + lane];
       lane_square[lane] = fp_mul_op(value, value);
@@ -433,8 +431,9 @@ void rmsnorm_token_fp(
   }
   mean_square = fp_div_op(mean_square, fp_const_int(llm_accel::kHiddenSize));
   const catapult_fp_t inv_rms = fp_div_op(fp_one(), fp_sqrt_op(fp_add_op(mean_square, rms_eps)));
+#pragma hls_unroll no
   for (int base = 0; base < llm_accel::kHiddenSize; base += kParallelMacLaneCount) {
-#pragma hls_unroll yes
+#pragma hls_unroll no
     for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
       output[base + lane] = fp_mul_op(fp_mul_op(input[base + lane], inv_rms), weight[base + lane]);
     }
@@ -473,7 +472,6 @@ MLP_PROJ_ACCUM_LOOP:
       for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
         const int out_index = out_base + out_offset;
         catapult_fp_t accum = partial_sum[out_offset];
-#pragma hls_unroll yes
         for (int in_offset = 0; in_offset < in_extent; in_offset += kParallelMacLaneCount) {
           const int lane_extent = min_int(kParallelMacLaneCount, in_extent - in_offset);
           accum = fp_add_op(
@@ -542,10 +540,9 @@ void qwen_prefill_mlp_gate_up_stage_catapult(
       tile_config.ff,
       up_proj);
 MLP_SILU_MUL_LOOP:
-#pragma hls_pipeline_init_interval 1
-  for (int base = 0; base < kIntermediateSize; base += kParallelMacLaneCount) {
-    const int lane_extent = min_int(kParallelMacLaneCount, kIntermediateSize - base);
-    silu_mul_block_128_fp(gate_proj + base, up_proj + base, lane_extent, silu_mul + base);
+#pragma hls_unroll no
+  for (int index = 0; index < kIntermediateSize; ++index) {
+    silu_mul[index] = fp_mul_op(silu_fp(gate_proj[index]), up_proj[index]);
   }
 }
 
@@ -571,6 +568,7 @@ void qwen_prefill_mlp_down_stage_catapult(
       down_proj);
 MLP_RESIDUAL_ADD_LOOP:
 #pragma hls_pipeline_init_interval 1
+#pragma hls_unroll no
   for (int base = 0; base < kHiddenSize; base += kParallelMacLaneCount) {
     const int lane_extent = min_int(kParallelMacLaneCount, kHiddenSize - base);
     residual_add_128_fp(attention_token + base, down_proj + base, lane_extent, output_token + base);

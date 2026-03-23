@@ -12,21 +12,21 @@ int ceil_div_int(int value, int divisor) {
 }
 
 void read_fp_words(
-    ac_channel<AttentionFpWordPacket>& channel,
+    ac_channel<PrefillStreamFpWordPacket>& channel,
     prefill_catapult_fp_t* destination,
     int element_count) {
-  const int packet_count = ceil_div_int(element_count, kAttentionFpWordsPerPacket);
+  const int packet_count = ceil_div_int(element_count, kPrefillStreamFpWordsPerPacket);
 
 READ_FP_PACKETS:
 #pragma hls_unroll no
 #pragma hls_pipeline_init_interval 1
   for (int packet_index = 0; packet_index < packet_count; ++packet_index) {
-    const AttentionFpWordPacket packet = channel.read();
+    const PrefillStreamFpWordPacket packet = channel.read();
 
 READ_FP_WORDS:
 #pragma hls_unroll yes
-    for (int word_index = 0; word_index < kAttentionFpWordsPerPacket; ++word_index) {
-      const int flat_index = packet_index * kAttentionFpWordsPerPacket + word_index;
+    for (int word_index = 0; word_index < kPrefillStreamFpWordsPerPacket; ++word_index) {
+      const int flat_index = packet_index * kPrefillStreamFpWordsPerPacket + word_index;
       if (flat_index < element_count) {
         destination[flat_index] = packet.data[word_index];
       }
@@ -35,21 +35,21 @@ READ_FP_WORDS:
 }
 
 void read_packed_words(
-    ac_channel<AttentionPackedWordPacket>& channel,
+    ac_channel<PrefillStreamPackedWordPacket>& channel,
     packed_w4_t* destination,
     int element_count) {
-  const int packet_count = ceil_div_int(element_count, kAttentionPackedWordsPerPacket);
+  const int packet_count = ceil_div_int(element_count, kPrefillStreamPackedWordsPerPacket);
 
 READ_PACKED_PACKETS:
 #pragma hls_unroll no
 #pragma hls_pipeline_init_interval 1
   for (int packet_index = 0; packet_index < packet_count; ++packet_index) {
-    const AttentionPackedWordPacket packet = channel.read();
+    const PrefillStreamPackedWordPacket packet = channel.read();
 
 READ_PACKED_WORDS:
 #pragma hls_unroll yes
-    for (int word_index = 0; word_index < kAttentionPackedWordsPerPacket; ++word_index) {
-      const int flat_index = packet_index * kAttentionPackedWordsPerPacket + word_index;
+    for (int word_index = 0; word_index < kPrefillStreamPackedWordsPerPacket; ++word_index) {
+      const int flat_index = packet_index * kPrefillStreamPackedWordsPerPacket + word_index;
       if (flat_index < element_count) {
         destination[flat_index] = packet.data[word_index];
       }
@@ -60,19 +60,19 @@ READ_PACKED_WORDS:
 void write_fp_words(
     const prefill_catapult_fp_t* source,
     int element_count,
-    ac_channel<AttentionFpWordPacket>& channel) {
-  const int packet_count = ceil_div_int(element_count, kAttentionFpWordsPerPacket);
+    ac_channel<PrefillStreamFpWordPacket>& channel) {
+  const int packet_count = ceil_div_int(element_count, kPrefillStreamFpWordsPerPacket);
 
 WRITE_FP_PACKETS:
 #pragma hls_unroll no
 #pragma hls_pipeline_init_interval 1
   for (int packet_index = 0; packet_index < packet_count; ++packet_index) {
-    AttentionFpWordPacket packet;
+    PrefillStreamFpWordPacket packet;
 
 WRITE_FP_WORDS:
 #pragma hls_unroll yes
-    for (int word_index = 0; word_index < kAttentionFpWordsPerPacket; ++word_index) {
-      const int flat_index = packet_index * kAttentionFpWordsPerPacket + word_index;
+    for (int word_index = 0; word_index < kPrefillStreamFpWordsPerPacket; ++word_index) {
+      const int flat_index = packet_index * kPrefillStreamFpWordsPerPacket + word_index;
       packet.data[word_index] = flat_index < element_count ? source[flat_index] : stream_fp_zero();
     }
 
@@ -90,22 +90,22 @@ bool valid_attention_stream_config(int seq_len) {
 KernelStatus qwen_prefill_attention_stream_top_catapult(
     int seq_len,
     prefill_catapult_fp_t rms_eps,
-    ac_channel<AttentionFpWordPacket>& input_sequence_chan,
-    ac_channel<AttentionFpWordPacket>& input_layernorm_weight_chan,
-    ac_channel<AttentionPackedWordPacket>& q_packed_weight_chan,
-    ac_channel<AttentionPackedWordPacket>& k_packed_weight_chan,
-    ac_channel<AttentionPackedWordPacket>& v_packed_weight_chan,
-    ac_channel<AttentionPackedWordPacket>& o_packed_weight_chan,
-    ac_channel<AttentionFpWordPacket>& q_bias_chan,
-    ac_channel<AttentionFpWordPacket>& k_bias_chan,
-    ac_channel<AttentionFpWordPacket>& v_bias_chan,
-    ac_channel<AttentionFpWordPacket>& q_scale_chan,
-    ac_channel<AttentionFpWordPacket>& k_scale_chan,
-    ac_channel<AttentionFpWordPacket>& v_scale_chan,
-    ac_channel<AttentionFpWordPacket>& o_scale_chan,
-    ac_channel<AttentionFpWordPacket>& k_cache_out_chan,
-    ac_channel<AttentionFpWordPacket>& v_cache_out_chan,
-    ac_channel<AttentionFpWordPacket>& output_sequence_chan) {
+    ac_channel<PrefillStreamFpWordPacket>& input_sequence_chan,
+    ac_channel<PrefillStreamFpWordPacket>& input_layernorm_weight_chan,
+    ac_channel<PrefillStreamPackedWordPacket>& q_packed_weight_chan,
+    ac_channel<PrefillStreamPackedWordPacket>& k_packed_weight_chan,
+    ac_channel<PrefillStreamPackedWordPacket>& v_packed_weight_chan,
+    ac_channel<PrefillStreamPackedWordPacket>& o_packed_weight_chan,
+    ac_channel<PrefillStreamFpWordPacket>& q_bias_chan,
+    ac_channel<PrefillStreamFpWordPacket>& k_bias_chan,
+    ac_channel<PrefillStreamFpWordPacket>& v_bias_chan,
+    ac_channel<PrefillStreamFpWordPacket>& q_scale_chan,
+    ac_channel<PrefillStreamFpWordPacket>& k_scale_chan,
+    ac_channel<PrefillStreamFpWordPacket>& v_scale_chan,
+    ac_channel<PrefillStreamFpWordPacket>& o_scale_chan,
+    ac_channel<PrefillStreamFpWordPacket>& k_cache_out_chan,
+    ac_channel<PrefillStreamFpWordPacket>& v_cache_out_chan,
+    ac_channel<PrefillStreamFpWordPacket>& output_sequence_chan) {
   const PrefillAttentionTileConfig tile_config = default_prefill_tile_config().attention;
   if (!valid_attention_stream_config(seq_len)) {
     return {false, 2};
