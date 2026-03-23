@@ -34,4 +34,17 @@ KernelStatus qwen_prefill_mlp_kernel_catapult(
     const prefill_catapult_fp_t down_scales[kHiddenSize],
     prefill_catapult_fp_t output_sequence[kPrefillCatapultSeqCapacity * kHiddenSize]);
 
+void qwen_prefill_mlp_token_catapult(
+    const prefill_catapult_fp_t attention_token[kHiddenSize],
+    const PrefillMLPTileConfig& tile_config,
+    const prefill_catapult_fp_t post_attention_layernorm_weight[kHiddenSize],
+    prefill_catapult_fp_t rms_eps,
+    const packed_w4_t gate_packed_weights[kIntermediateSize * kHiddenSize / 2],
+    const packed_w4_t up_packed_weights[kIntermediateSize * kHiddenSize / 2],
+    const packed_w4_t down_packed_weights[kIntermediateSize * kHiddenSize / 2],
+    const prefill_catapult_fp_t gate_scales[kIntermediateSize],
+    const prefill_catapult_fp_t up_scales[kIntermediateSize],
+    const prefill_catapult_fp_t down_scales[kHiddenSize],
+    prefill_catapult_fp_t output_token[kHiddenSize]);
+
 }  // namespace llm_accel

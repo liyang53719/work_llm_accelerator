@@ -112,9 +112,9 @@ KernelStatus qwen_prefill_mlp_stream_top_catapult(
   prefill_catapult_fp_t gate_scales[kIntermediateSize];
   prefill_catapult_fp_t up_scales[kIntermediateSize];
   prefill_catapult_fp_t down_scales[kHiddenSize];
-  prefill_catapult_fp_t output_sequence[kPrefillCatapultSeqCapacity * kHiddenSize];
+  prefill_catapult_fp_t attention_token[kHiddenSize];
+  prefill_catapult_fp_t output_token[kHiddenSize];
 
-  read_fp_words(attention_residual_chan, attention_residual, seq_len * kHiddenSize);
   read_fp_words(post_attention_layernorm_weight_chan, post_attention_layernorm_weight, kHiddenSize);
   read_packed_words(gate_packed_weight_chan, gate_packed_weights, kIntermediateSize * kHiddenSize / 2);
   read_packed_words(up_packed_weight_chan, up_packed_weights, kIntermediateSize * kHiddenSize / 2);
@@ -123,25 +123,26 @@ KernelStatus qwen_prefill_mlp_stream_top_catapult(
   read_fp_words(up_scale_chan, up_scales, kIntermediateSize);
   read_fp_words(down_scale_chan, down_scales, kHiddenSize);
 
-  const KernelStatus status = qwen_prefill_mlp_kernel_catapult(
-      attention_residual,
-      seq_len,
-      tile_config,
-      post_attention_layernorm_weight,
-      rms_eps,
-      gate_packed_weights,
-      up_packed_weights,
-      down_packed_weights,
-      gate_scales,
-      up_scales,
-      down_scales,
-      output_sequence);
-  if (!status.ok) {
-    return status;
+MLP_STREAM_TOKEN_LOOP:
+#pragma hls_pipeline_init_interval 8
+  for (int token_index = 0; token_index < seq_len; ++token_index) {
+    read_fp_words(attention_residual_chan, attention_token, kHiddenSize);
+    qwen_prefill_mlp_token_catapult(
+        attention_token,
+        tile_config,
+        post_attention_layernorm_weight,
+        rms_eps,
+        gate_packed_weights,
+        up_packed_weights,
+        down_packed_weights,
+        gate_scales,
+        up_scales,
+        down_scales,
+        output_token);
+    write_fp_words(output_token, kHiddenSize, output_sequence_chan);
   }
 
-  write_fp_words(output_sequence, seq_len * kHiddenSize, output_sequence_chan);
-  return status;
+  return {true, 0};
 }
 
 }  // namespace llm_accel
