@@ -85,6 +85,64 @@ void write_fp_words(
   }
 }
 
+template <int ElementCount, typename PacketType>
+void read_fp_words_exact(
+    ac_channel<PacketType>& channel,
+    llm_accel::prefill_catapult_fp_t* destination) {
+  static_assert(
+      ElementCount % llm_accel::kPrefillStreamFpWordsPerPacket == 0,
+      "ElementCount must align with the FP stream packet width");
+
+  constexpr int kPacketCount = ElementCount / llm_accel::kPrefillStreamFpWordsPerPacket;
+
+  for (int packet_index = 0; packet_index < kPacketCount; ++packet_index) {
+    const PacketType packet = channel.read();
+    for (int word_index = 0; word_index < llm_accel::kPrefillStreamFpWordsPerPacket; ++word_index) {
+      const int flat_index = packet_index * llm_accel::kPrefillStreamFpWordsPerPacket + word_index;
+      destination[flat_index] = packet.data[word_index];
+    }
+  }
+}
+
+template <int ElementCount, typename PacketType>
+void read_packed_words_exact(
+    ac_channel<PacketType>& channel,
+    llm_accel::packed_w4_t* destination) {
+  static_assert(
+      ElementCount % llm_accel::kPrefillStreamPackedWordsPerPacket == 0,
+      "ElementCount must align with the packed stream packet width");
+
+  constexpr int kPacketCount = ElementCount / llm_accel::kPrefillStreamPackedWordsPerPacket;
+
+  for (int packet_index = 0; packet_index < kPacketCount; ++packet_index) {
+    const PacketType packet = channel.read();
+    for (int word_index = 0; word_index < llm_accel::kPrefillStreamPackedWordsPerPacket; ++word_index) {
+      const int flat_index = packet_index * llm_accel::kPrefillStreamPackedWordsPerPacket + word_index;
+      destination[flat_index] = packet.data[word_index];
+    }
+  }
+}
+
+template <int ElementCount, typename PacketType>
+void write_fp_words_exact(
+    const llm_accel::prefill_catapult_fp_t* source,
+    ac_channel<PacketType>& channel) {
+  static_assert(
+      ElementCount % llm_accel::kPrefillStreamFpWordsPerPacket == 0,
+      "ElementCount must align with the FP stream packet width");
+
+  constexpr int kPacketCount = ElementCount / llm_accel::kPrefillStreamFpWordsPerPacket;
+
+  for (int packet_index = 0; packet_index < kPacketCount; ++packet_index) {
+    PacketType packet;
+    for (int word_index = 0; word_index < llm_accel::kPrefillStreamFpWordsPerPacket; ++word_index) {
+      const int flat_index = packet_index * llm_accel::kPrefillStreamFpWordsPerPacket + word_index;
+      packet.data[word_index] = source[flat_index];
+    }
+    channel.write(packet);
+  }
+}
+
 float approx_sqrt(float value) {
   if (value <= 0.0f) {
     return 0.0f;
@@ -750,23 +808,23 @@ KernelStatus qwen_prefill_mlp_stream_core_catapult(
   prefill_catapult_fp_t post_norm[kHiddenSize];
   prefill_catapult_fp_t output_accum[kHiddenSize];
   prefill_catapult_fp_t output_token[kHiddenSize];
-  prefill_catapult_fp_t gate_proj[kMlpStreamCoreFfTile];
-  prefill_catapult_fp_t up_proj[kMlpStreamCoreFfTile];
-  prefill_catapult_fp_t silu_tile[kMlpStreamCoreFfTile];
-  prefill_catapult_fp_t gate_scale_tile[kMlpStreamCoreFfTile];
-  prefill_catapult_fp_t up_scale_tile[kMlpStreamCoreFfTile];
-  prefill_catapult_fp_t down_scale_tile[kMlpStreamCoreHiddenTile];
+  prefill_catapult_fp_t gate_proj[kMlpStreamCoreFfTile + 1];
+  prefill_catapult_fp_t up_proj[kMlpStreamCoreFfTile + 1];
+  prefill_catapult_fp_t silu_tile[kMlpStreamCoreFfTile + 1];
+  prefill_catapult_fp_t gate_scale_tile[kMlpStreamCoreFfTile + 1];
+  prefill_catapult_fp_t up_scale_tile[kMlpStreamCoreFfTile + 1];
+  prefill_catapult_fp_t down_scale_tile[kMlpStreamCoreHiddenTile + 1];
   packed_w4_t gate_weight_tile[kMlpStreamCorePackedTileWords];
   packed_w4_t up_weight_tile[kMlpStreamCorePackedTileWords];
   packed_w4_t down_weight_tile[kMlpStreamCorePackedTileWords];
 
-  read_fp_words(post_attention_layernorm_weight_chan, post_attention_layernorm_weight, kHiddenSize);
-  read_fp_words(down_scale_chan, down_scales, kHiddenSize);
+  read_fp_words_exact<kHiddenSize>(post_attention_layernorm_weight_chan, post_attention_layernorm_weight);
+  read_fp_words_exact<kHiddenSize>(down_scale_chan, down_scales);
 
 MLP_STREAM_CORE_TOKEN_LOOP:
-#pragma hls_pipeline_init_interval 8
+#pragma hls_pipeline_init_interval 16
   for (int token_index = 0; token_index < seq_len; ++token_index) {
-    read_fp_words(attention_residual_chan, attention_token, kHiddenSize);
+    read_fp_words_exact<kHiddenSize>(attention_residual_chan, attention_token);
     rmsnorm_token_fp(attention_token, post_attention_layernorm_weight, rms_eps, post_norm);
 
 MLP_STREAM_CORE_OUTPUT_INIT:
@@ -777,8 +835,8 @@ MLP_STREAM_CORE_OUTPUT_INIT:
 
 MLP_STREAM_CORE_FF_LOOP:
     for (int ff_base = 0; ff_base < kIntermediateSize; ff_base += kMlpStreamCoreFfTile) {
-      read_fp_words(gate_scale_tile_chan, gate_scale_tile, kMlpStreamCoreFfTile);
-      read_fp_words(up_scale_tile_chan, up_scale_tile, kMlpStreamCoreFfTile);
+      read_fp_words_exact<kMlpStreamCoreFfTile>(gate_scale_tile_chan, gate_scale_tile);
+      read_fp_words_exact<kMlpStreamCoreFfTile>(up_scale_tile_chan, up_scale_tile);
 
 MLP_STREAM_CORE_PROJ_INIT:
 #pragma hls_pipeline_init_interval 1
@@ -789,8 +847,8 @@ MLP_STREAM_CORE_PROJ_INIT:
 
 MLP_STREAM_CORE_HIDDEN_LOOP:
       for (int hidden_base = 0; hidden_base < kHiddenSize; hidden_base += kMlpStreamCoreHiddenTile) {
-        read_packed_words(gate_packed_weight_tile_chan, gate_weight_tile, kMlpStreamCorePackedTileWords);
-        read_packed_words(up_packed_weight_tile_chan, up_weight_tile, kMlpStreamCorePackedTileWords);
+        read_packed_words_exact<kMlpStreamCorePackedTileWords>(gate_packed_weight_tile_chan, gate_weight_tile);
+        read_packed_words_exact<kMlpStreamCorePackedTileWords>(up_packed_weight_tile_chan, up_weight_tile);
 
 MLP_STREAM_CORE_GATEUP_ACCUM:
 #pragma hls_pipeline_init_interval 4
@@ -828,7 +886,7 @@ MLP_STREAM_CORE_DOWNSCALE_LOAD:
           down_scale_tile[out_offset] = down_scales[out_base + out_offset];
         }
 
-        read_packed_words(down_packed_weight_tile_chan, down_weight_tile, kMlpStreamCorePackedTileWords);
+        read_packed_words_exact<kMlpStreamCorePackedTileWords>(down_packed_weight_tile_chan, down_weight_tile);
 
 MLP_STREAM_CORE_DOWN_ACCUM:
 #pragma hls_pipeline_init_interval 4
@@ -852,7 +910,7 @@ MLP_STREAM_CORE_DOWN_ACCUM:
       residual_add_128_fp(attention_token + base, output_accum + base, lane_extent, output_token + base);
     }
 
-    write_fp_words(output_token, kHiddenSize, output_sequence_chan);
+    write_fp_words_exact<kHiddenSize>(output_token, output_sequence_chan);
   }
 
   return {true, 0};
