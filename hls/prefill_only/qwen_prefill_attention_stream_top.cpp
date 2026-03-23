@@ -86,7 +86,9 @@ bool valid_attention_stream_config(int seq_len) {
 
 }  // namespace
 
+#ifndef QWEN_HLS_GLUE_INLINE_CHILD_TOPS
 #pragma hls_design top
+#endif
 KernelStatus qwen_prefill_attention_stream_top_catapult(
     int seq_len,
     prefill_catapult_fp_t rms_eps,

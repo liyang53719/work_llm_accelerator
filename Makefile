@@ -3,13 +3,15 @@ TCL_PREFILL := hls/prefill_only/run_catapult_prefill_attention.tcl
 TCL_PREFILL_ATTENTION_STREAM := script/run_catapult_prefill_attention_stream.tcl
 TCL_PREFILL_MLP_STREAM := script/run_catapult_prefill_mlp_stream.tcl
 TCL_PREFILL_MLP_STREAM_CORE := script/run_catapult_prefill_mlp_stream_core.tcl
+TCL_PREFILL_GLUE_TOP_V1 := script/run_catapult_prefill_glue_top_v1.tcl
 LOG_DIR := work/tmp
 LOG_FILE := $(LOG_DIR)/catapult_prefill_latest.log
 LOG_FILE_PREFILL_ATTENTION_STREAM := $(LOG_DIR)/catapult_prefill_attention_stream_latest.log
 LOG_FILE_PREFILL_MLP_STREAM := $(LOG_DIR)/catapult_prefill_mlp_stream_latest.log
 LOG_FILE_PREFILL_MLP_STREAM_CORE := $(LOG_DIR)/catapult_prefill_mlp_stream_core_latest.log
+LOG_FILE_PREFILL_GLUE_TOP_V1 := $(LOG_DIR)/catapult_prefill_glue_top_v1_latest.log
 
-.PHONY: catapult_prefill catapult_prefill_attention_stream catapult_prefill_mlp_stream catapult_prefill_mlp_stream_core clean
+.PHONY: catapult_prefill catapult_prefill_attention_stream catapult_prefill_mlp_stream catapult_prefill_mlp_stream_core catapult_prefill_glue_top_v1 clean
 catapult_prefill:
 	mkdir -p $(LOG_DIR)
 	$(CATAPULT) -shell -file $(TCL_PREFILL) | tee $(LOG_FILE)
@@ -26,8 +28,12 @@ catapult_prefill_mlp_stream_core:
 	mkdir -p $(LOG_DIR)
 	$(CATAPULT) -shell -file $(TCL_PREFILL_MLP_STREAM_CORE) | tee $(LOG_FILE_PREFILL_MLP_STREAM_CORE)
 
+catapult_prefill_glue_top_v1:
+	mkdir -p $(LOG_DIR)
+	$(CATAPULT) -shell -file $(TCL_PREFILL_GLUE_TOP_V1) | tee $(LOG_FILE_PREFILL_GLUE_TOP_V1)
+
 clean:
 	rm -rf Catapult_*
 	rm -f Catapult_*.ccs
 	rm -f catapult.log
-	rm -f $(LOG_FILE) $(LOG_FILE_PREFILL_ATTENTION_STREAM) $(LOG_FILE_PREFILL_MLP_STREAM) $(LOG_FILE_PREFILL_MLP_STREAM_CORE)
+	rm -f $(LOG_FILE) $(LOG_FILE_PREFILL_ATTENTION_STREAM) $(LOG_FILE_PREFILL_MLP_STREAM) $(LOG_FILE_PREFILL_MLP_STREAM_CORE) $(LOG_FILE_PREFILL_GLUE_TOP_V1)
