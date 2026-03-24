@@ -785,7 +785,9 @@ void qwen_prefill_mlp_token_catapult(
   }
 }
 
-#ifndef QWEN_HLS_GLUE_INLINE_CHILD_TOPS
+#ifdef QWEN_HLS_GLUE_INLINE_CHILD_TOPS
+#pragma hls_design block
+#else
 #pragma hls_design top
 #endif
 KernelStatus qwen_prefill_mlp_stream_core_catapult(

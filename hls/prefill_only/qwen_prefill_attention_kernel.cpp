@@ -620,11 +620,22 @@ void rmsnorm_token_fp(
     const catapult_fp_t weight[llm_accel::kHiddenSize],
     const catapult_fp_t& rms_eps,
     catapult_fp_t output[llm_accel::kHiddenSize]) {
-  catapult_fp_t scaled_weight[llm_accel::kHiddenSize];
   const catapult_fp_t mean_square = fp_mul_op(rmsnorm_square_sum_fp(input), fp_const(1.0f / 1536.0f));
   const catapult_fp_t inv_rms = approx_rsqrt_fp(fp_add_op(mean_square, rms_eps));
-  rmsnorm_scale_weight_fp(weight, inv_rms, scaled_weight);
-  rmsnorm_apply_scale_fp(input, scaled_weight, output);
+
+  for (int chunk_index = 0; chunk_index < kRmsNormChunkCount; ++chunk_index) {
+    const int base_index = chunk_index * kParallelMacLaneCount;
+    catapult_fp_t scaled_weight_chunk[kParallelMacLaneCount];
+    catapult_fp_t output_chunk[kParallelMacLaneCount];
+
+    rmsnorm_scale_weight_chunk_fp(weight, inv_rms, base_index, scaled_weight_chunk);
+    rmsnorm_apply_scale_chunk_fp(input, scaled_weight_chunk, base_index, output_chunk);
+
+#pragma hls_unroll yes
+    for (int lane = 0; lane < kParallelMacLaneCount; ++lane) {
+      output[base_index + lane] = output_chunk[lane];
+    }
+  }
 }
 
 void apply_rope_inplace_fp(catapult_fp_t* head, int token_index) {
@@ -1183,6 +1194,32 @@ void process_context_head_group(
   store_context_head_state_packet(head_state_packet, head_base, head_end, context_packet->data);
 }
 
+void process_context_head_group(
+    const catapult_fp_t* q_token,
+    const catapult_fp_t* k_proj,
+    const catapult_fp_t* v_proj,
+    int seq_len,
+    int query_index,
+    int key_tile,
+    int head_base,
+    int head_end,
+    catapult_fp_t* context_token) {
+  ContextHeadStatePacket head_state_packet;
+
+  init_context_head_state_packet(head_base, head_end, &head_state_packet);
+  compute_context_head_state_packet(
+      q_token,
+      k_proj,
+      v_proj,
+      seq_len,
+      query_index,
+      key_tile,
+      head_base,
+      head_end,
+      &head_state_packet);
+  store_context_head_state_packet(head_state_packet, head_base, head_end, context_token);
+}
+
 void prefill_attention_context_query_fp(
   const ContextQueryPacket& q_packet,
     const catapult_fp_t* k_proj,
@@ -1206,6 +1243,32 @@ void prefill_attention_context_query_fp(
         head_base,
         head_end,
         context_packet);
+  }
+}
+
+void prefill_attention_context_query_token_fp(
+    const catapult_fp_t* q_token,
+    const catapult_fp_t* k_proj,
+    const catapult_fp_t* v_proj,
+    int seq_len,
+    int query_index,
+    const llm_accel::PrefillAttentionTileConfig& tile_config,
+    catapult_fp_t* context_token) {
+  const int key_tile = max_int(1, tile_config.key);
+  const int query_heads_parallel = max_int(1, tile_config.query_heads_parallel);
+
+  for (int head_base = 0; head_base < llm_accel::kNumAttentionHeads; head_base += query_heads_parallel) {
+    const int head_end = min_int(llm_accel::kNumAttentionHeads, head_base + query_heads_parallel);
+    process_context_head_group(
+        q_token,
+        k_proj,
+        v_proj,
+        seq_len,
+        query_index,
+        key_tile,
+        head_base,
+        head_end,
+        context_token);
   }
 }
 
@@ -1307,7 +1370,6 @@ void project_kv_token_bias_fp(
     int out_tile,
     int in_tile,
     catapult_fp_t output[kKvWidth]) {
-  catapult_fp_t output_buffer[kKvWidth];
   project_tiled_token_fp_impl<true, kKvWidth, llm_accel::kHiddenSize>(
       input_token,
       packed_weights,
@@ -1315,11 +1377,68 @@ void project_kv_token_bias_fp(
       scales,
       out_tile,
       in_tile,
-      output_buffer);
+      output);
+}
 
-#pragma hls_unroll yes
-  for (int index = 0; index < kKvWidth; ++index) {
-    output[index] = output_buffer[index];
+void project_rmsnorm_kv_token_bias_fp(
+    const catapult_fp_t input_token[llm_accel::kHiddenSize],
+    const catapult_fp_t weight[llm_accel::kHiddenSize],
+    const catapult_fp_t& inv_rms,
+    const llm_accel::packed_w4_t packed_weights[kKvWidth * llm_accel::kHiddenSize / 2],
+    const catapult_fp_t bias[kKvWidth],
+    const catapult_fp_t scales[kKvWidth],
+    int out_tile,
+    int in_tile,
+    catapult_fp_t output[kKvWidth]) {
+  catapult_fp_t input_tile[kProjectionTileCapacity];
+  catapult_fp_t partial_sum[kProjectionTileCapacity];
+
+  for (int out_base = 0; out_base < kKvWidth; out_base += out_tile) {
+    const int out_extent = min_int(out_tile, kKvWidth - out_base);
+ATTN_NORM_KV_PROJ_INIT_LOOP:
+#pragma hls_pipeline_init_interval 1
+    for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+      partial_sum[out_offset] = bias[out_base + out_offset];
+    }
+
+    for (int in_base = 0; in_base < llm_accel::kHiddenSize; in_base += in_tile) {
+      const int in_extent = min_int(in_tile, llm_accel::kHiddenSize - in_base);
+ATTN_NORM_KV_PROJ_LOAD_LOOP:
+#pragma hls_pipeline_init_interval 1
+      for (int in_offset = 0; in_offset < in_extent; ++in_offset) {
+        const int input_index = in_base + in_offset;
+        input_tile[in_offset] = fp_mul_op(
+            input_token[input_index],
+            fp_mul_op(weight[input_index], inv_rms));
+      }
+
+ATTN_NORM_KV_PROJ_ACCUM_LOOP:
+#pragma hls_pipeline_init_interval 2
+      for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+        const int out_index = out_base + out_offset;
+        catapult_fp_t accum = partial_sum[out_offset];
+        for (int in_offset = 0; in_offset < in_extent; in_offset += kParallelMacLaneCount) {
+          const int lane_extent = min_int(kParallelMacLaneCount, in_extent - in_offset);
+          accum = fp_add_op(
+              accum,
+              weighted_chunk_dot_fp(
+                  input_tile + in_offset,
+                  packed_weights,
+                  scales,
+                  out_index,
+                  in_base + in_offset,
+                  llm_accel::kHiddenSize,
+                  lane_extent));
+        }
+        partial_sum[out_offset] = accum;
+      }
+    }
+
+ATTN_NORM_KV_PROJ_STORE_LOOP:
+#pragma hls_pipeline_init_interval 1
+    for (int out_offset = 0; out_offset < out_extent; ++out_offset) {
+      output[out_base + out_offset] = partial_sum[out_offset];
+    }
   }
 }
 
@@ -2214,21 +2333,26 @@ void qwen_prefill_attention_kv_cache_stage_catapult(
 ATNN_KV_STREAM_LOOP:
 #pragma hls_pipeline_init_interval 2
     for (int token_index = token_begin; token_index < token_end; ++token_index) {
-      catapult_fp_t normalized_token[llm_accel::kHiddenSize];
+      const catapult_fp_t* input_token = input_sequence + token_index * llm_accel::kHiddenSize;
+      const catapult_fp_t mean_square = fp_mul_op(rmsnorm_square_sum_fp(input_token), fp_const(1.0f / 1536.0f));
+      const catapult_fp_t inv_rms = approx_rsqrt_fp(fp_add_op(mean_square, rms_eps));
       catapult_fp_t* k_proj_token = k_cache + token_index * kKvWidth;
       catapult_fp_t* v_proj_token = v_cache + token_index * kKvWidth;
 
-      rmsnorm_token_fp(input_sequence + token_index * llm_accel::kHiddenSize, input_layernorm_weight, rms_eps, normalized_token);
-      project_kv_token_bias_fp(
-          normalized_token,
+      project_rmsnorm_kv_token_bias_fp(
+        input_token,
+        input_layernorm_weight,
+        inv_rms,
           k_packed_weights,
           k_bias,
           k_scales,
           tile_config.kv_proj,
           tile_config.hidden_proj,
           k_proj_token);
-      project_kv_token_bias_fp(
-          normalized_token,
+      project_rmsnorm_kv_token_bias_fp(
+        input_token,
+        input_layernorm_weight,
+        inv_rms,
           v_packed_weights,
           v_bias,
           v_scales,
@@ -2544,17 +2668,16 @@ ZERO_Q_CONTEXT_OUTPUT_TOKEN:
 
   for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
     const int query_end = min_int(seq_len, query_begin + query_tile);
-    catapult_fp_t q_proj_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize];
-    catapult_fp_t context_tile[kPrefillQueryCapacity][llm_accel::kHiddenSize];
 
 ATNN_Q_STREAM_LOOP:
 #pragma hls_unroll no
 #pragma hls_pipeline_init_interval 2
     for (int query_index = query_begin; query_index < query_end; ++query_index) {
+      catapult_fp_t q_proj_token[llm_accel::kHiddenSize];
+      catapult_fp_t context_token[llm_accel::kHiddenSize];
       const catapult_fp_t* input_token = input_sequence + query_index * llm_accel::kHiddenSize;
       const catapult_fp_t mean_square = fp_mul_op(rmsnorm_square_sum_fp(input_token), fp_const(1.0f / 1536.0f));
       const catapult_fp_t inv_rms = approx_rsqrt_fp(fp_add_op(mean_square, rms_eps));
-      catapult_fp_t* q_proj_token = q_proj_tile[query_index - query_begin];
 
       project_hidden_token_tilewise_fp(
           input_token,
@@ -2574,22 +2697,16 @@ ATNN_Q_STREAM_LOOP:
           apply_rope_inplace_fp(q_proj_token + head * kHeadDim, query_index);
         }
       }
-    }
 
-    prefill_attention_context_query_tile_fp(
-        q_proj_tile,
-        k_cache,
-        v_cache,
-        seq_len,
-        query_begin,
-        query_end,
-        tile_config,
-        context_tile);
+      prefill_attention_context_query_token_fp(
+          q_proj_token,
+          k_cache,
+          v_cache,
+          seq_len,
+          query_index,
+          tile_config,
+          context_token);
 
-ATNN_Q_CONTEXT_OUTPUT_LOOP:
-#pragma hls_pipeline_init_interval 4
-    for (int query_index = query_begin; query_index < query_end; ++query_index) {
-      const catapult_fp_t* context_token = context_tile[query_index - query_begin];
       catapult_fp_t* output_token = output_sequence + query_index * kHiddenSize;
       project_hidden_token_tilewise_fp(
           context_token,

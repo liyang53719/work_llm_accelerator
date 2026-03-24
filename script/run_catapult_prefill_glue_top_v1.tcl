@@ -130,7 +130,16 @@ solution library add ccs_sample_mem
 go libraries
 source_saed_setup $mgc_home
 directive set -CLOCKS [list clk [list -CLOCK_PERIOD $clock_period]]
-directive set /$top_function/core -MEM_MAP_THRESHOLD 129
+directive set /$top_function/core -MEM_MAP_THRESHOLD 65536
+if {[catch {directive set /$top_function/llm_accel::qwen_prefill_attention_stream_top_catapult/core -MEM_MAP_THRESHOLD 65536} err]} {
+	puts "Info: unable to set attention child MEM_MAP_THRESHOLD: $err"
+}
+if {[catch {directive set /$top_function/llm_accel::qwen_prefill_mlp_stream_core_catapult/core -MEM_MAP_THRESHOLD 65536} err]} {
+	puts "Info: unable to set MLP child MEM_MAP_THRESHOLD: $err"
+}
+if {[catch {directive set /$top_function/llm_accel::qwen_prefill_attention_stream_top_catapult/core/llm_accel::qwen_prefill_attention_q_context_output_stage_catapult/core -MEM_MAP_THRESHOLD 65536} err]} {
+	puts "Info: unable to set q-context stage MEM_MAP_THRESHOLD: $err"
+}
 directive set SCHED_USE_MULTICYCLE true
 
 go assembly

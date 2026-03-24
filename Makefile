@@ -32,6 +32,14 @@ catapult_prefill_glue_top_v1:
 	mkdir -p $(LOG_DIR)
 	$(CATAPULT) -shell -file $(TCL_PREFILL_GLUE_TOP_V1) | tee $(LOG_FILE_PREFILL_GLUE_TOP_V1)
 
+catapult_prefill_glue_top_v1_scverify_fsdb:
+	mkdir -p $(LOG_DIR)
+	bash script/run_glue_top_scverify_fsdb.sh
+
+catapult_prefill_glue_top_v1_dc_22nm:
+	mkdir -p $(LOG_DIR)
+	bash script/run_glue_top_dc_22nm.sh
+
 clean:
 	rm -rf Catapult_*
 	rm -f Catapult_*.ccs

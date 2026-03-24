@@ -29,11 +29,15 @@ void qwen_prefill_glue_top_v1_catapult(
     ac_channel<PrefillStreamFpWordPacket>& up_scale_tile_chan,
     ac_channel<PrefillStreamFpWordPacket>& down_scale_chan,
     ac_channel<PrefillStreamFpWordPacket>& output_sequence_chan) {
-  ac_channel<PrefillStreamFpWordPacket> attention_residual_bridge_chan;
+    const int attention_seq_len = seq_len;
+    const int mlp_seq_len = seq_len;
+    const prefill_catapult_fp_t attention_rms_eps = rms_eps;
+    const prefill_catapult_fp_t mlp_rms_eps = rms_eps;
+    static ac_channel<PrefillStreamFpWordPacket> attention_residual_bridge_chan;
 
   qwen_prefill_attention_stream_top_catapult(
-      seq_len,
-      rms_eps,
+            attention_seq_len,
+            attention_rms_eps,
       input_sequence_chan,
       input_layernorm_weight_chan,
       q_packed_weight_chan,
@@ -52,8 +56,8 @@ void qwen_prefill_glue_top_v1_catapult(
       attention_residual_bridge_chan);
 
   qwen_prefill_mlp_stream_core_catapult(
-      seq_len,
-      rms_eps,
+      mlp_seq_len,
+      mlp_rms_eps,
       attention_residual_bridge_chan,
       post_attention_layernorm_weight_chan,
       gate_packed_weight_tile_chan,
