@@ -1,4 +1,5 @@
 #include "qwen_prefill_attention_kernel.h"
+#include "qwen_prefill_stream_types.h"
 #include <ac_channel.h>
 
 #ifdef __SYNTHESIS__
@@ -3005,6 +3006,95 @@ ATNN_Q_STREAM_LOOP:
             kHeadDim,
             tile_config.hidden_proj,
             output_token);
+      }
+    }
+  }
+}
+
+void qwen_prefill_attention_q_context_output_stream_stage_catapult(
+    const catapult_fp_t input_sequence[kPrefillSeqCapacity * kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const catapult_fp_t input_layernorm_weight[kHiddenSize],
+    catapult_fp_t rms_eps,
+    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const catapult_fp_t q_bias[kHiddenSize],
+    const catapult_fp_t q_scales[kHiddenSize],
+    const catapult_fp_t k_cache[kPrefillSeqCapacity * kKvWidth],
+    const catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth],
+    const packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const catapult_fp_t o_scales[kHiddenSize],
+    ac_channel<PrefillStreamFpWordPacket>& output_sequence_chan) {
+  const int query_tile = max_int(1, tile_config.query);
+  const int key_tile = max_int(1, tile_config.key);
+
+  for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
+    const int query_end = min_int(seq_len, query_begin + query_tile);
+
+ATNN_Q_STREAM_OUTPUT_LOOP:
+#pragma hls_unroll no
+#pragma hls_pipeline_init_interval 2
+    for (int query_index = query_begin; query_index < query_end; ++query_index) {
+      catapult_fp_t q_head_token[llm_accel::kHeadDim];
+      catapult_fp_t context_head[llm_accel::kHeadDim];
+      catapult_fp_t output_token[kHiddenSize];
+      const catapult_fp_t* input_token = input_sequence + query_index * llm_accel::kHiddenSize;
+      const catapult_fp_t mean_square = fp_mul_op(rmsnorm_square_sum_fp(input_token), fp_const(1.0f / 1536.0f));
+      const catapult_fp_t inv_rms = approx_rsqrt_fp(fp_add_op(mean_square, rms_eps));
+
+INIT_ATTN_OUTPUT_TOKEN_LOOP:
+#pragma hls_unroll no
+      for (int dim = 0; dim < kHiddenSize; ++dim) {
+        output_token[dim] = hidden_proj_fp_zero();
+      }
+
+      for (int head = 0; head < kNumAttentionHeads; ++head) {
+        const int head_base = head * kHeadDim;
+#pragma hls_unroll no
+        project_hidden_output_range_token_tilewise_fp(
+            input_token,
+            input_layernorm_weight,
+            q_packed_weights,
+            q_bias,
+            q_scales,
+            inv_rms,
+            tile_config.hidden_proj,
+            true,
+            head_base,
+            kHeadDim,
+            q_head_token);
+
+        apply_rope_inplace_fp(q_head_token, query_index);
+
+        prefill_attention_context_single_head_fp(
+            q_head_token,
+            k_cache,
+            v_cache,
+            seq_len,
+            query_index,
+            key_tile,
+            head,
+            context_head);
+
+        accumulate_hidden_input_range_token_tilewise_fp(
+            context_head,
+            o_packed_weights,
+            o_scales,
+            head_base,
+            kHeadDim,
+            tile_config.hidden_proj,
+            output_token);
+      }
+
+      const int packet_count = (kHiddenSize + kPrefillStreamFpWordsPerPacket - 1) / kPrefillStreamFpWordsPerPacket;
+      for (int packet_index = 0; packet_index < packet_count; ++packet_index) {
+        PrefillStreamFpWordPacket packet;
+        for (int word_index = 0; word_index < kPrefillStreamFpWordsPerPacket; ++word_index) {
+          const int flat_index = packet_index * kPrefillStreamFpWordsPerPacket + word_index;
+          packet.data[word_index] =
+              flat_index < kHiddenSize ? output_token[flat_index] : hidden_proj_fp_zero();
+        }
+        output_sequence_chan.write(packet);
       }
     }
   }

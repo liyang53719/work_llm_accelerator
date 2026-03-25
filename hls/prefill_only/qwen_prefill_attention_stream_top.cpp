@@ -1,6 +1,22 @@
 #include "qwen_prefill_attention_stream_top.h"
 
 namespace llm_accel {
+
+void qwen_prefill_attention_q_context_output_stream_stage_catapult(
+    const prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize],
+    int seq_len,
+    const PrefillAttentionTileConfig& tile_config,
+    const prefill_catapult_fp_t input_layernorm_weight[kHiddenSize],
+    prefill_catapult_fp_t rms_eps,
+    const packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const prefill_catapult_fp_t q_bias[kHiddenSize],
+    const prefill_catapult_fp_t q_scales[kHiddenSize],
+    const prefill_catapult_fp_t k_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
+    const prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth],
+    const packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2],
+    const prefill_catapult_fp_t o_scales[kHiddenSize],
+    ac_channel<PrefillStreamFpWordPacket>& output_sequence_chan);
+
 namespace {
 
 inline prefill_catapult_fp_t stream_fp_zero() {
@@ -131,7 +147,9 @@ KernelStatus qwen_prefill_attention_stream_top_catapult(
   prefill_catapult_fp_t o_scales[kHiddenSize];
   prefill_catapult_fp_t k_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth];
   prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth];
+#ifndef __SYNTHESIS__
   prefill_catapult_fp_t output_sequence[kPrefillCatapultSeqCapacity * kHiddenSize];
+#endif
 
   read_fp_words(input_sequence_chan, input_sequence, seq_len * kHiddenSize);
   read_fp_words(input_layernorm_weight_chan, input_layernorm_weight, kHiddenSize);
@@ -147,6 +165,41 @@ KernelStatus qwen_prefill_attention_stream_top_catapult(
   read_fp_words(v_scale_chan, v_scales, kPrefillCatapultKvWidth);
   read_fp_words(o_scale_chan, o_scales, kHiddenSize);
 
+#ifdef __SYNTHESIS__
+  qwen_prefill_attention_kv_cache_stage_catapult(
+      {input_sequence},
+      seq_len,
+      tile_config,
+      {input_layernorm_weight},
+      rms_eps,
+      {k_packed_weights},
+      {v_packed_weights},
+      {k_bias},
+      {v_bias},
+      {k_scales},
+      {v_scales},
+      {k_cache},
+      {v_cache});
+
+  qwen_prefill_attention_q_context_output_stream_stage_catapult(
+      input_sequence,
+      seq_len,
+      tile_config,
+      input_layernorm_weight,
+      rms_eps,
+      q_packed_weights,
+      q_bias,
+      q_scales,
+      k_cache,
+      v_cache,
+      o_packed_weights,
+      o_scales,
+      output_sequence_chan);
+
+  write_fp_words(k_cache, seq_len * kPrefillCatapultKvWidth, k_cache_out_chan);
+  write_fp_words(v_cache, seq_len * kPrefillCatapultKvWidth, v_cache_out_chan);
+  return {true, 0};
+#else
   const KernelStatus status = qwen_prefill_attention_kernel_catapult(
       {input_sequence},
       seq_len,
@@ -175,6 +228,7 @@ KernelStatus qwen_prefill_attention_stream_top_catapult(
   write_fp_words(v_cache, seq_len * kPrefillCatapultKvWidth, v_cache_out_chan);
   write_fp_words(output_sequence, seq_len * kHiddenSize, output_sequence_chan);
   return status;
+#endif
 }
 
 }  // namespace llm_accel
