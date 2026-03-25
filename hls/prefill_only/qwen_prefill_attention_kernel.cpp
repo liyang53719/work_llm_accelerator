@@ -1563,6 +1563,21 @@ void qwen_prefill_attention_hidden_proj_tile_array_core(
     int out_extent,
     bool apply_rmsnorm);
 
+void qwen_prefill_attention_hidden_proj_tile_pointer_core(
+    const prefill_catapult_fp_t input_tile[kProjectionTileCapacity],
+    const prefill_catapult_fp_t input_layernorm_weight_tile[kProjectionTileCapacity],
+    const packed_w4_t* packed_weights,
+    const prefill_catapult_fp_t scales_tile[kProjectionTileCapacity],
+    const prefill_catapult_fp_t partial_sum_tile_in[kProjectionTileCapacity],
+    prefill_catapult_fp_t partial_sum_tile_out[kProjectionTileCapacity],
+    prefill_catapult_fp_t inv_rms,
+    int global_out_base,
+    int global_in_base,
+    int lane_extent,
+    int out_extent,
+    int in_dim,
+    bool apply_rmsnorm);
+
 void load_hidden_proj_fp_tile_packet(
     const prefill_catapult_fp_t* source,
     int base,
@@ -1664,6 +1679,17 @@ void store_hidden_proj_partial_tile_packet(
     int out_base) {
   for (int index = 0; index < out_extent; ++index) {
     output[out_base + index] = packet.data[index];
+  }
+}
+
+void load_hidden_proj_partial_tile_from_output(
+    const prefill_catapult_fp_t* output,
+    int out_base,
+    int out_extent,
+    HiddenProjPartialTilePacket* packet) {
+#pragma hls_unroll no
+  for (int index = 0; index < kProjectionTileCapacity; ++index) {
+    packet->data[index] = index < out_extent ? output[out_base + index] : hidden_proj_fp_zero();
   }
 }
 
@@ -1909,6 +1935,255 @@ void qwen_prefill_attention_hidden_proj_tile_array_core(
   (void)apply_rmsnorm;
 #endif
 }
+
+void qwen_prefill_attention_hidden_proj_tile_pointer_core(
+    const prefill_catapult_fp_t input_tile[kProjectionTileCapacity],
+    const prefill_catapult_fp_t input_layernorm_weight_tile[kProjectionTileCapacity],
+    const packed_w4_t* packed_weights,
+    const prefill_catapult_fp_t scales_tile[kProjectionTileCapacity],
+    const prefill_catapult_fp_t partial_sum_tile_in[kProjectionTileCapacity],
+    prefill_catapult_fp_t partial_sum_tile_out[kProjectionTileCapacity],
+    prefill_catapult_fp_t inv_rms,
+    int global_out_base,
+    int global_in_base,
+    int lane_extent,
+    int out_extent,
+    int in_dim,
+    bool apply_rmsnorm) {
+#ifdef __SYNTHESIS__
+  catapult_fp_t normalized_input_tile[kProjectionTileCapacity];
+
+#pragma hls_unroll no
+  for (int lane = 0; lane < kProjectionTileCapacity; ++lane) {
+    normalized_input_tile[lane] =
+        fp_mul_op(input_tile[lane], fp_mul_op(input_layernorm_weight_tile[lane], inv_rms));
+  }
+
+#pragma hls_unroll no
+#pragma hls_pipeline_init_interval 2
+  for (int out_offset = 0; out_offset < kProjectionTileCapacity; ++out_offset) {
+    if (out_offset < out_extent) {
+      partial_sum_tile_out[out_offset] = fp_add_op(
+          partial_sum_tile_in[out_offset],
+          weighted_chunk_dot_fp(
+              normalized_input_tile,
+              packed_weights,
+              scales_tile,
+              global_out_base + out_offset,
+              global_in_base,
+              in_dim,
+              lane_extent));
+    } else {
+      partial_sum_tile_out[out_offset] = partial_sum_tile_in[out_offset];
+    }
+  }
+#else
+  (void)input_tile;
+  (void)input_layernorm_weight_tile;
+  (void)packed_weights;
+  (void)scales_tile;
+  (void)partial_sum_tile_in;
+  (void)partial_sum_tile_out;
+  (void)inv_rms;
+  (void)global_out_base;
+  (void)global_in_base;
+  (void)lane_extent;
+  (void)out_extent;
+  (void)in_dim;
+  (void)apply_rmsnorm;
+#endif
+}
+
+void project_hidden_output_range_token_tilewise_fp(
+    const prefill_catapult_fp_t* input_token,
+    const prefill_catapult_fp_t* input_layernorm_weight,
+    const packed_w4_t* packed_weights,
+    const prefill_catapult_fp_t* bias,
+    const prefill_catapult_fp_t* scales,
+    prefill_catapult_fp_t inv_rms,
+    int tile_span,
+    bool apply_rmsnorm,
+    int output_base,
+    int output_extent_total,
+    prefill_catapult_fp_t* output_range) {
+#ifdef __SYNTHESIS__
+  const int proj_tile = min_int(kProjectionTileCapacity, max_int(1, tile_span));
+
+  for (int out_base = output_base; out_base < output_base + output_extent_total; out_base += proj_tile) {
+    const int out_extent = min_int(proj_tile, output_base + output_extent_total - out_base);
+    HiddenProjScaleTilePacket scale_tile_packet;
+    HiddenProjPartialTilePacket partial_sum_tile_packet;
+    HiddenProjPartialTilePacket partial_sum_tile_next_packet;
+    const prefill_catapult_fp_t effective_inv_rms = apply_rmsnorm ? inv_rms : hidden_proj_fp_one();
+
+    load_hidden_proj_scale_tile_packet(scales, out_base, out_extent, &scale_tile_packet);
+    init_hidden_proj_partial_tile_packet(bias, out_base, out_extent, &partial_sum_tile_packet);
+
+    for (int in_base = 0; in_base < kHiddenSize; in_base += proj_tile) {
+      const int in_extent = min_int(proj_tile, kHiddenSize - in_base);
+      HiddenProjFpTilePacket input_tile_packet;
+      HiddenProjFpTilePacket layernorm_tile_packet;
+
+      load_hidden_proj_fp_tile_packet(input_token, in_base, in_extent, &input_tile_packet);
+      if (apply_rmsnorm && input_layernorm_weight != nullptr) {
+        load_hidden_proj_fp_tile_packet(input_layernorm_weight, in_base, in_extent, &layernorm_tile_packet);
+      } else {
+        init_hidden_proj_one_tile_packet(&layernorm_tile_packet);
+      }
+
+      qwen_prefill_attention_hidden_proj_tile_pointer_core(
+          input_tile_packet.data,
+          layernorm_tile_packet.data,
+          packed_weights,
+          scale_tile_packet.data,
+          partial_sum_tile_packet.data,
+          partial_sum_tile_next_packet.data,
+          effective_inv_rms,
+          out_base,
+          in_base,
+          in_extent,
+          out_extent,
+          kHiddenSize,
+          apply_rmsnorm);
+
+#pragma hls_unroll no
+      for (int out_offset = 0; out_offset < kProjectionTileCapacity; ++out_offset) {
+        partial_sum_tile_packet.data[out_offset] = partial_sum_tile_next_packet.data[out_offset];
+      }
+    }
+
+    store_hidden_proj_partial_tile_packet(
+        partial_sum_tile_packet,
+        out_extent,
+        output_range,
+        out_base - output_base);
+  }
+#else
+  (void)input_token;
+  (void)input_layernorm_weight;
+  (void)packed_weights;
+  (void)bias;
+  (void)scales;
+  (void)inv_rms;
+  (void)tile_span;
+  (void)apply_rmsnorm;
+  (void)output_base;
+  (void)output_extent_total;
+  (void)output_range;
+#endif
+}
+
+void accumulate_hidden_input_range_token_tilewise_fp(
+    const prefill_catapult_fp_t* input_range,
+    const packed_w4_t* packed_weights,
+    const prefill_catapult_fp_t* scales,
+    int input_base,
+    int input_extent_total,
+    int tile_span,
+    prefill_catapult_fp_t* output_token) {
+#ifdef __SYNTHESIS__
+  const int proj_tile = min_int(kProjectionTileCapacity, max_int(1, tile_span));
+
+  for (int out_base = 0; out_base < kHiddenSize; out_base += proj_tile) {
+    const int out_extent = min_int(proj_tile, kHiddenSize - out_base);
+    HiddenProjScaleTilePacket scale_tile_packet;
+    HiddenProjPartialTilePacket partial_sum_tile_packet;
+    HiddenProjPartialTilePacket partial_sum_tile_next_packet;
+
+    load_hidden_proj_scale_tile_packet(scales, out_base, out_extent, &scale_tile_packet);
+    load_hidden_proj_partial_tile_from_output(output_token, out_base, out_extent, &partial_sum_tile_packet);
+
+    for (int input_offset = 0; input_offset < input_extent_total; input_offset += proj_tile) {
+      const int lane_extent = min_int(proj_tile, input_extent_total - input_offset);
+      HiddenProjFpTilePacket input_tile_packet;
+      HiddenProjFpTilePacket layernorm_tile_packet;
+
+      load_hidden_proj_fp_tile_packet(input_range, input_offset, lane_extent, &input_tile_packet);
+      init_hidden_proj_one_tile_packet(&layernorm_tile_packet);
+
+      qwen_prefill_attention_hidden_proj_tile_pointer_core(
+          input_tile_packet.data,
+          layernorm_tile_packet.data,
+          packed_weights,
+          scale_tile_packet.data,
+          partial_sum_tile_packet.data,
+          partial_sum_tile_next_packet.data,
+          hidden_proj_fp_one(),
+          out_base,
+          input_base + input_offset,
+          lane_extent,
+          out_extent,
+          kHiddenSize,
+          false);
+
+#pragma hls_unroll no
+      for (int out_offset = 0; out_offset < kProjectionTileCapacity; ++out_offset) {
+        partial_sum_tile_packet.data[out_offset] = partial_sum_tile_next_packet.data[out_offset];
+      }
+    }
+
+    store_hidden_proj_partial_tile_packet(partial_sum_tile_packet, out_extent, output_token, out_base);
+  }
+#else
+  (void)input_range;
+  (void)packed_weights;
+  (void)scales;
+  (void)input_base;
+  (void)input_extent_total;
+  (void)tile_span;
+  (void)output_token;
+#endif
+}
+
+#ifdef __SYNTHESIS__
+void prefill_attention_context_single_head_fp(
+    const catapult_fp_t* q_head,
+    const catapult_fp_t* k_proj,
+    const catapult_fp_t* v_proj,
+    int seq_len,
+    int query_index,
+    int key_tile,
+    int head,
+    catapult_fp_t* context_head) {
+  const int kv_head = head / kNumGroups;
+  const catapult_fp_t attention_scaling = fp_const(0.08838834764831845f);
+  catapult_fp_t max_score = fp_const(-1.0e30f);
+  catapult_fp_t denom = fp_zero();
+
+  zero_head_accum_128_fp(context_head);
+
+  for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
+    const int query_limit = query_index + 1;
+    const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
+    for (int key_index = key_begin; key_index < key_end; ++key_index) {
+      const catapult_fp_t* k_head = k_proj + key_index * kKvWidth + kv_head * kHeadDim;
+      const catapult_fp_t score = fp_mul_op(dot_product_128_fp(q_head, k_head), attention_scaling);
+      if (fp_gt_op(score, max_score)) {
+        max_score = score;
+      }
+    }
+  }
+
+  for (int key_begin = 0; key_begin <= query_index && key_begin < seq_len; key_begin += key_tile) {
+    const int query_limit = query_index + 1;
+    const int key_end = min_int(seq_len, min_int(query_limit, key_begin + key_tile));
+    for (int key_index = key_begin; key_index < key_end; ++key_index) {
+      const catapult_fp_t* k_head = k_proj + key_index * kKvWidth + kv_head * kHeadDim;
+      const catapult_fp_t* v_head = v_proj + key_index * kKvWidth + kv_head * kHeadDim;
+      const catapult_fp_t score = fp_mul_op(dot_product_128_fp(q_head, k_head), attention_scaling);
+      const catapult_fp_t exp_score = approx_exp_fp(fp_sub_op(score, max_score));
+      denom = fp_add_op(denom, exp_score);
+      scaled_accum_128_fp(exp_score, v_head, context_head);
+    }
+  }
+
+  const catapult_fp_t inv_denom = fp_gt_op(denom, fp_zero())
+      ? approx_reciprocal_fp(denom)
+      : fp_zero();
+  scale_store_128_fp(context_head, inv_denom, context_head);
+}
+
+#endif
 
 #pragma hls_pipeline_init_interval 1
 #pragma hls_resource inv_rms:rsc variables="inv_rms" map_to_module="[DirectInput]"
@@ -2328,6 +2603,13 @@ void qwen_prefill_attention_kv_cache_stage_catapult(
     catapult_fp_t v_cache[kPrefillSeqCapacity * kKvWidth]) {
   const int seq_tile = max_int(1, tile_config.seq);
 
+ATTN_KV_CACHE_INIT_LOOP:
+#pragma hls_unroll no
+  for (int index = 0; index < kPrefillSeqCapacity * kKvWidth; ++index) {
+    k_cache[index] = fp_zero();
+    v_cache[index] = fp_zero();
+  }
+
   for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
     const int token_end = min_int(seq_len, token_begin + seq_tile);
 ATNN_KV_STREAM_LOOP:
@@ -2655,6 +2937,7 @@ void qwen_prefill_attention_q_context_output_stage_catapult(
     const catapult_fp_t o_scales[kHiddenSize],
     catapult_fp_t output_sequence[kPrefillSeqCapacity * kHiddenSize]) {
   const int query_tile = max_int(1, tile_config.query);
+  const int key_tile = max_int(1, tile_config.key);
 
 INIT_Q_CONTEXT_OUTPUT_BUFFER:
 #pragma hls_unroll no
@@ -2673,51 +2956,50 @@ ATNN_Q_STREAM_LOOP:
 #pragma hls_unroll no
 #pragma hls_pipeline_init_interval 2
     for (int query_index = query_begin; query_index < query_end; ++query_index) {
-      catapult_fp_t q_proj_token[llm_accel::kHiddenSize];
-      catapult_fp_t context_token[llm_accel::kHiddenSize];
+      catapult_fp_t q_head_token[llm_accel::kHeadDim];
+      catapult_fp_t context_head[llm_accel::kHeadDim];
       const catapult_fp_t* input_token = input_sequence + query_index * llm_accel::kHiddenSize;
+      catapult_fp_t* output_token = output_sequence + query_index * kHiddenSize;
       const catapult_fp_t mean_square = fp_mul_op(rmsnorm_square_sum_fp(input_token), fp_const(1.0f / 1536.0f));
       const catapult_fp_t inv_rms = approx_rsqrt_fp(fp_add_op(mean_square, rms_eps));
 
-      project_hidden_token_tilewise_fp(
-          input_token,
-          input_layernorm_weight,
-          q_packed_weights,
-          q_bias,
-          q_scales,
-          inv_rms,
-          tile_config.hidden_proj,
-          true,
-          q_proj_token);
-
-      for (int head_base = 0; head_base < kNumAttentionHeads; head_base += tile_config.query_heads_parallel) {
-        const int head_end = min_int(kNumAttentionHeads, head_base + tile_config.query_heads_parallel);
+      for (int head = 0; head < kNumAttentionHeads; ++head) {
+        const int head_base = head * kHeadDim;
 #pragma hls_unroll no
-        for (int head = head_base; head < head_end; ++head) {
-          apply_rope_inplace_fp(q_proj_token + head * kHeadDim, query_index);
-        }
+        project_hidden_output_range_token_tilewise_fp(
+            input_token,
+            input_layernorm_weight,
+            q_packed_weights,
+            q_bias,
+            q_scales,
+            inv_rms,
+            tile_config.hidden_proj,
+            true,
+            head_base,
+            kHeadDim,
+            q_head_token);
+
+        apply_rope_inplace_fp(q_head_token, query_index);
+
+        prefill_attention_context_single_head_fp(
+            q_head_token,
+            k_cache,
+            v_cache,
+            seq_len,
+            query_index,
+            key_tile,
+            head,
+            context_head);
+
+        accumulate_hidden_input_range_token_tilewise_fp(
+            context_head,
+            o_packed_weights,
+            o_scales,
+            head_base,
+            kHeadDim,
+            tile_config.hidden_proj,
+            output_token);
       }
-
-      prefill_attention_context_query_token_fp(
-          q_proj_token,
-          k_cache,
-          v_cache,
-          seq_len,
-          query_index,
-          tile_config,
-          context_token);
-
-      catapult_fp_t* output_token = output_sequence + query_index * kHiddenSize;
-      project_hidden_token_tilewise_fp(
-          context_token,
-          nullptr,
-          o_packed_weights,
-          nullptr,
-          o_scales,
-          hidden_proj_fp_zero(),
-          tile_config.hidden_proj,
-          false,
-          output_token);
     }
   }
 }

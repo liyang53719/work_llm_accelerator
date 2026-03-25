@@ -1,7 +1,7 @@
 #include "qwen_prefill_top_core.h"
 
-#include "qwen_prefill_attention_kernel.h"
-#include "qwen_prefill_mlp_kernel.h"
+#include "qwen_prefill_attention_block.h"
+#include "qwen_prefill_mlp_block.h"
 
 namespace llm_accel {
 namespace {
@@ -82,17 +82,15 @@ bool valid_memory_windows(const PrefillLayerDescriptor& descriptor) {
 }  // namespace
 
 KernelStatus qwen_prefill_top_core(
-    const PrefillLayerDescriptor& descriptor,
-    const PrefillTopLevelPorts& ports,
-    scalar_t* attention_scratch) {
+  const PrefillLayerDescriptor& descriptor,
+  const PrefillTopLevelPorts& ports) {
   if (!valid_layer_id(descriptor.layer_id) || descriptor.seq_len <= 0 ||
       !valid_prefill_tile_config(descriptor.tile_config)) {
     return {false, kPrefillInvalidDescriptorError};
   }
   if (ports.weight_ddr == nullptr || ports.scale_ddr == nullptr || ports.kv_cache_ddr == nullptr ||
       ports.activation_ddr == nullptr || ports.weight_sram == nullptr || ports.kv_sram == nullptr ||
-      ports.partial_sum_sram == nullptr || ports.softmax_sram == nullptr || ports.control_sram == nullptr ||
-      attention_scratch == nullptr) {
+      ports.partial_sum_sram == nullptr || ports.softmax_sram == nullptr || ports.control_sram == nullptr) {
     return {false, kPrefillInvalidPortError};
   }
   if (!valid_memory_windows(descriptor)) {
@@ -102,6 +100,7 @@ KernelStatus qwen_prefill_top_core(
   const LayerParameterLayout layout = default_layer_parameter_layout();
   const scalar_t* input_sequence = scalar_ptr(ports.activation_ddr, descriptor.input_sequence_addr);
   scalar_t* output_sequence = scalar_ptr(ports.activation_ddr, descriptor.output_sequence_addr);
+  scalar_t* attention_scratch = scalar_ptr(ports.activation_ddr, descriptor.scratch_base_addr);
   scalar_t* k_cache = scalar_ptr(ports.kv_cache_ddr, descriptor.k_cache_base_addr);
   scalar_t* v_cache = scalar_ptr(ports.kv_cache_ddr, descriptor.v_cache_base_addr);
   const scalar_t* input_layernorm_weight =
@@ -136,10 +135,8 @@ KernelStatus qwen_prefill_top_core(
   const packed_w4_t* down_weights =
       weight_ptr(ports.weight_ddr, descriptor.layer_weights_base_addr + layout.down_weight_offset_bytes);
 
-  KernelStatus attention_status = qwen_prefill_attention_kernel(
+    const PrefillAttentionBlockIO attention_io = {
       input_sequence,
-      descriptor.seq_len,
-      descriptor.tile_config.attention,
       input_layernorm_weight,
       kRmsNormEps,
       q_weights,
@@ -155,15 +152,19 @@ KernelStatus qwen_prefill_top_core(
       o_scales,
       k_cache,
       v_cache,
-      attention_scratch);
+      attention_scratch,
+    };
+
+    KernelStatus attention_status = qwen_prefill_attention_block(
+      descriptor.seq_len,
+      descriptor.tile_config.attention,
+      attention_io);
   if (!attention_status.ok) {
     return attention_status;
   }
 
-  return qwen_prefill_mlp_kernel(
+    const PrefillMlpBlockIO mlp_io = {
       attention_scratch,
-      descriptor.seq_len,
-      descriptor.tile_config.mlp,
       post_attention_layernorm_weight,
       kRmsNormEps,
       gate_weights,
@@ -172,7 +173,13 @@ KernelStatus qwen_prefill_top_core(
       gate_scales,
       up_scales,
       down_scales,
-      output_sequence);
+      output_sequence,
+    };
+
+    return qwen_prefill_mlp_block(
+      descriptor.seq_len,
+      descriptor.tile_config.mlp,
+      mlp_io);
 }
 
 }  // namespace llm_accel

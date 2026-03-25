@@ -48,12 +48,14 @@ constexpr bool valid_layer_id(int layer_id) {
 }
 
 inline bool valid_prefill_tile_config(const PrefillTileConfig& tile_config) {
+  const bool valid_attention_head_dim =
+      tile_config.attention.head_dim == kAttentionMacCols || tile_config.attention.head_dim == kHeadDim;
   return tile_config.attention.seq > 0 &&
          tile_config.attention.query == kAttentionMacRows &&
          tile_config.attention.key == kAttentionMacCols &&
          tile_config.attention.hidden_proj == kAttentionMacCols &&
          tile_config.attention.kv_proj == kAttentionMacCols &&
-         tile_config.attention.head_dim == kAttentionMacCols &&
+         valid_attention_head_dim &&
          tile_config.attention.query_heads_parallel > 0 && tile_config.attention.kv_heads_parallel > 0 &&
          tile_config.mlp.seq > 0 && tile_config.mlp.hidden > 0 && tile_config.mlp.ff > 0;
 }

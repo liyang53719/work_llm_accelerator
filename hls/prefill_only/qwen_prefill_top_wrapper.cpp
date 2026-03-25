@@ -1,10 +1,6 @@
 #include "qwen_prefill_top_wrapper.h"
 
-#include <vector>
-
 #include "qwen_prefill_top_core.h"
-#include "qwen_prefill_attention_kernel.h"
-#include "qwen_prefill_mlp_kernel.h"
 
 namespace llm_accel {
 
@@ -18,8 +14,7 @@ KernelStatus qwen_prefill_top_wrapper(
     return {false, kPrefillInvalidDescriptorError};
   }
 
-  std::vector<scalar_t> attention_output(static_cast<std::size_t>(descriptor.seq_len) * kHiddenSize, 0.0f);
-  return qwen_prefill_top_core(descriptor, ports, attention_output.data());
+  return qwen_prefill_top_core(descriptor, ports);
 }
 
 DispatchStatus qwen_prefill_dispatch_layers(

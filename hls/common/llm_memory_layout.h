@@ -14,10 +14,6 @@ constexpr std::uint64_t kSoftmaxScratchBytes = 128ULL << 10;
 constexpr std::uint64_t kControlScratchBytes =
     kSramBudgetBytes - kWeightBufferBytes - kKvWorkingSetBytes - kPartialSumBytes - kSoftmaxScratchBytes;
 
-constexpr std::uint64_t kPackedWeightBytesPerLayer =
-    static_cast<std::uint64_t>(kHiddenSize) *
-    static_cast<std::uint64_t>(kHiddenSize + 2 * kNumKeyValueHeads * kHeadDim + kIntermediateSize + kHiddenSize) / 2ULL;
-
 constexpr std::uint64_t kNormWeightBytesPerLayer =
     2ULL * static_cast<std::uint64_t>(kHiddenSize) * sizeof(float);
 
@@ -33,8 +29,17 @@ constexpr std::uint64_t kUpWeightBytes = kGateWeightBytes;
 constexpr std::uint64_t kDownWeightBytes =
   static_cast<std::uint64_t>(kIntermediateSize) * static_cast<std::uint64_t>(kHiddenSize) / 2ULL;
 
+constexpr std::uint64_t kPackedWeightBytesPerLayer =
+    static_cast<std::uint64_t>(kQWeightBytes) +
+    static_cast<std::uint64_t>(kKWeightBytes) +
+    static_cast<std::uint64_t>(kVWeightBytes) +
+    static_cast<std::uint64_t>(kOWeightBytes) +
+    static_cast<std::uint64_t>(kGateWeightBytes) +
+    static_cast<std::uint64_t>(kUpWeightBytes) +
+    static_cast<std::uint64_t>(kDownWeightBytes);
+
 constexpr std::uint64_t kProjectionScaleBytesPerLayer =
-    static_cast<std::uint64_t>(3 * kHiddenSize + kIntermediateSize + kHiddenSize) * sizeof(float);
+  static_cast<std::uint64_t>(3 * kHiddenSize + 2 * kNumKeyValueHeads * kHeadDim + 2 * kIntermediateSize) * sizeof(float);
 
 constexpr std::uint64_t kProjectionBiasBytesPerLayer =
   static_cast<std::uint64_t>(kHiddenSize + 2 * kNumKeyValueHeads * kHeadDim) * sizeof(float);

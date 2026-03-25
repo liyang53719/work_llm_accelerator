@@ -111,7 +111,7 @@ def main() -> None:
     direct_v_cache = np.zeros(args.seq_len * KV_WIDTH, dtype=np.float32)
     direct_output = np.zeros(args.seq_len * HIDDEN_SIZE, dtype=np.float32)
 
-    activation_ddr = np.zeros(args.seq_len * HIDDEN_SIZE * 2, dtype=np.float32)
+    activation_ddr = np.zeros(args.seq_len * HIDDEN_SIZE * 3, dtype=np.float32)
     activation_ddr[: args.seq_len * HIDDEN_SIZE] = input_sequence.reshape(-1)
     kv_cache_ddr = np.zeros(args.seq_len * KV_WIDTH * 2, dtype=np.float32)
     weight_sram = np.zeros(1, dtype=np.uint8)

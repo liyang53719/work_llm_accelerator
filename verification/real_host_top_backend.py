@@ -219,7 +219,7 @@ class RealHostTopBackend(BackendInterface):
             weight_ddr, scale_ddr = self._pack_layer_parameters(layer_id)
             activation_stride = seq_len * self.hidden_size
             kv_stride = seq_len * self.kv_width
-            activation_ddr = np.zeros(activation_stride * 2, dtype=np.float32)
+            activation_ddr = np.zeros(activation_stride * 3, dtype=np.float32)
             activation_ddr[:activation_stride] = hidden_states.reshape(-1)
             kv_cache_ddr = np.zeros(kv_stride * 2, dtype=np.float32)
             weight_sram, kv_sram, partial_sum_sram, softmax_sram, control_sram = self._scratch_buffers()

@@ -32,10 +32,12 @@ mkdir -p "$OUT_DIR"
 g++ -std=c++17 -O2 -fPIC -shared \
   -I"$CATAPULT_SHARED_INCLUDE" \
   -Wl,-rpath,"$CATAPULT_LIBSTDCPP_DIR" \
+  "$ROOT_DIR/hls/prefill_only/qwen_prefill_attention_block.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_attention_stream_top.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_attention_kernel.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_glue_top_v1_catapult.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_host_catapult_shims.cpp" \
+  "$ROOT_DIR/hls/prefill_only/qwen_prefill_mlp_block.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_mlp_kernel.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_top_core.cpp" \
   "$ROOT_DIR/hls/prefill_only/qwen_prefill_top_wrapper.cpp" \

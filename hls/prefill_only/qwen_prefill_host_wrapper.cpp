@@ -665,6 +665,7 @@ extern "C" int qwen_prefill_top_smoke_forward(
     std::int32_t* partial_sum_sram,
     float* softmax_sram,
     float* control_sram) {
+  const std::uint64_t sequence_bytes = static_cast<std::uint64_t>(seq_len) * static_cast<std::uint64_t>(kHiddenSize) * sizeof(float);
   PrefillLayerDescriptor descriptor{
       layer_id,
       seq_len,
@@ -686,7 +687,7 @@ extern "C" int qwen_prefill_top_smoke_forward(
       layer_scales_base_addr,
       k_cache_base_addr,
       v_cache_base_addr,
-      0,
+        output_sequence_addr + sequence_bytes,
   };
   PrefillTopLevelPorts ports{
       weight_ddr,

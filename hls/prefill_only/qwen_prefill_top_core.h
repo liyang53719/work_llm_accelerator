@@ -9,9 +9,9 @@ constexpr int kPrefillInvalidPortError = 21;
 constexpr int kPrefillInvalidMemoryWindowError = 22;
 constexpr int kPrefillSequenceCapacity = kDefaultPrefillSeqTile;
 
-constexpr std::uint64_t kPrefillWeightWindowBytes = kPackedWeightBytesPerLayer;
+constexpr std::uint64_t kPrefillWeightWindowBytes = kLayerParameterBytes;
 constexpr std::uint64_t kPrefillScaleWindowElements =
-    (kNormWeightBytesPerLayer + kProjectionBiasBytesPerLayer + kProjectionScaleBytesPerLayer) / sizeof(scalar_t);
+    (kLayerParameterBytes + sizeof(scalar_t) - 1ULL) / sizeof(scalar_t);
 constexpr std::uint64_t kPrefillKvCacheWindowElements =
     2ULL * static_cast<std::uint64_t>(kPrefillSequenceCapacity) * static_cast<std::uint64_t>(kNumKeyValueHeads * kHeadDim);
 constexpr std::uint64_t kPrefillActivationWindowElements =
@@ -19,7 +19,6 @@ constexpr std::uint64_t kPrefillActivationWindowElements =
 
 KernelStatus qwen_prefill_top_core(
     const PrefillLayerDescriptor& descriptor,
-    const PrefillTopLevelPorts& ports,
-    scalar_t* attention_scratch);
+    const PrefillTopLevelPorts& ports);
 
 }  // namespace llm_accel
