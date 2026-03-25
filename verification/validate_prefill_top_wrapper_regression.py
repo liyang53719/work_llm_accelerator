@@ -17,7 +17,8 @@ for path in (VERIFICATION_DIR, PYTHON_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from layer_descriptor_builder import build_layer_parameter_layout, load_qwen_model_spec  # type: ignore
+from layer_descriptor_builder import build_layer_parameter_layout  # type: ignore
+from qwen_model_spec import QwenModelSpec  # type: ignore
 
 
 DEFAULT_LIB_PATH = ROOT / "tmp" / "host_libs" / "libqwen_prefill_stub.so"
@@ -25,16 +26,27 @@ HIDDEN_SIZE = 1536
 KV_WIDTH = 256
 INTERMEDIATE_SIZE = 8960
 ATTENTION_SEQ_TILE = 128
-ATTENTION_QUERY_TILE = 128
-ATTENTION_KEY_TILE = 128
-ATTENTION_HIDDEN_PROJ_TILE = 256
-ATTENTION_KV_PROJ_TILE = 256
+ATTENTION_QUERY_TILE = 32
+ATTENTION_KEY_TILE = 64
+ATTENTION_HIDDEN_PROJ_TILE = 64
+ATTENTION_KV_PROJ_TILE = 64
 ATTENTION_HEAD_DIM_TILE = 128
 ATTENTION_QUERY_HEADS_PARALLEL = 2
 ATTENTION_KV_HEADS_PARALLEL = 1
 MLP_SEQ_TILE = 128
 MLP_HIDDEN_TILE = 256
 MLP_FF_TILE = 640
+
+LOCAL_QWEN_SPEC = QwenModelSpec(
+    hidden_size=HIDDEN_SIZE,
+    intermediate_size=INTERMEDIATE_SIZE,
+    num_hidden_layers=28,
+    num_attention_heads=12,
+    num_key_value_heads=2,
+    vocab_size=151936,
+    rms_norm_eps=1.0e-6,
+    max_position_embeddings=32768,
+)
 
 
 def set_packed_weight(packed: np.ndarray, out_dim: int, in_dim: int, out_index: int, in_index: int, value: int) -> None:
@@ -63,8 +75,7 @@ def main() -> None:
     parser.add_argument("--atol", type=float, default=1e-5)
     args = parser.parse_args()
 
-    spec = load_qwen_model_spec()
-    layout = build_layer_parameter_layout(spec)
+    layout = build_layer_parameter_layout(LOCAL_QWEN_SPEC)
 
     input_sequence = build_sequence_case(args.seq_len)
     input_layernorm_weight = np.ones(HIDDEN_SIZE, dtype=np.float32)
