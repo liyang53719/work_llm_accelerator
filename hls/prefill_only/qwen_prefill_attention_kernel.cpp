@@ -35,9 +35,6 @@ constexpr int kHiddenProjFpWordCount = kProjectionTileCapacity / kMaxFpWordsPerB
 constexpr int kHiddenProjPackedTileSize = kProjectionTileCapacity * kProjectionTileCapacity / 2;
 constexpr int kHiddenProjPackedWordCount = kHiddenProjPackedTileSize / kMaxPackedWordsPerBeat;
 
-llm_accel::scalar_t g_q_proj_buffer[kPrefillSeqCapacity][llm_accel::kHiddenSize];
-llm_accel::scalar_t g_context_buffer[kPrefillQueryCapacity][llm_accel::kHiddenSize];
-
 inline int min_int(int lhs, int rhs) {
   return lhs < rhs ? lhs : rhs;
 }
@@ -204,7 +201,7 @@ void project_tiled_token(
 }
 
 void prefill_attention_context_block(
-    const llm_accel::scalar_t q_proj[kPrefillSeqCapacity][llm_accel::kHiddenSize],
+  const llm_accel::scalar_t q_proj[kPrefillQueryCapacity][llm_accel::kHiddenSize],
     const llm_accel::scalar_t* k_proj,
     const llm_accel::scalar_t* v_proj,
     int seq_len,
@@ -216,7 +213,7 @@ void prefill_attention_context_block(
   const int query_heads_parallel = max_int(1, tile_config.query_heads_parallel);
 
   for (int query_index = query_begin; query_index < query_end; ++query_index) {
-    const llm_accel::scalar_t* q_token = q_proj[query_index];
+    const llm_accel::scalar_t* q_token = q_proj[query_index - query_begin];
     llm_accel::scalar_t* context_token = context[query_index - query_begin];
 
     for (int head_base = 0; head_base < llm_accel::kNumAttentionHeads; head_base += query_heads_parallel) {
@@ -2279,27 +2276,18 @@ KernelStatus qwen_prefill_attention_kernel(
 
   const int seq_tile = max_int(1, tile_config.seq);
   const int query_tile = max_int(1, tile_config.query);
+  scalar_t q_proj_tile[kPrefillQueryCapacity][kHiddenSize];
+  scalar_t context_tile[kPrefillQueryCapacity][kHiddenSize];
 
   for (int token_begin = 0; token_begin < seq_len; token_begin += seq_tile) {
     const int token_end = min_int(seq_len, token_begin + seq_tile);
     for (int token_index = token_begin; token_index < token_end; ++token_index) {
       scalar_t input_norm_token[kHiddenSize];
       const scalar_t* input_token = input_sequence + token_index * kHiddenSize;
-      scalar_t* q_proj_token = g_q_proj_buffer[token_index];
       scalar_t* k_proj_token = k_cache + token_index * kKvWidth;
       scalar_t* v_proj_token = v_cache + token_index * kKvWidth;
 
       rmsnorm_token(input_token, input_layernorm_weight, rms_eps, input_norm_token);
-      project_tiled_token(
-          input_norm_token,
-          q_packed_weights,
-          q_bias,
-          q_scales,
-          kHiddenSize,
-          kHiddenSize,
-          tile_config.hidden_proj,
-          tile_config.hidden_proj,
-          q_proj_token);
       project_tiled_token(
           input_norm_token,
           k_packed_weights,
@@ -2320,13 +2308,6 @@ KernelStatus qwen_prefill_attention_kernel(
           tile_config.kv_proj,
           tile_config.hidden_proj,
           v_proj_token);
-
-      for (int head_base = 0; head_base < kNumAttentionHeads; head_base += tile_config.query_heads_parallel) {
-        const int head_end = min_int(kNumAttentionHeads, head_base + tile_config.query_heads_parallel);
-        for (int head = head_base; head < head_end; ++head) {
-          apply_rope_inplace(q_proj_token + head * kHeadDim, token_index);
-        }
-      }
       for (int head_base = 0; head_base < kNumKeyValueHeads; head_base += tile_config.kv_heads_parallel) {
         const int head_end = min_int(kNumKeyValueHeads, head_base + tile_config.kv_heads_parallel);
         for (int head = head_base; head < head_end; ++head) {
@@ -2338,18 +2319,43 @@ KernelStatus qwen_prefill_attention_kernel(
 
   for (int query_begin = 0; query_begin < seq_len; query_begin += query_tile) {
     const int query_end = min_int(seq_len, query_begin + query_tile);
+    for (int query_index = query_begin; query_index < query_end; ++query_index) {
+      scalar_t input_norm_token[kHiddenSize];
+      const scalar_t* input_token = input_sequence + query_index * kHiddenSize;
+      scalar_t* q_proj_token = q_proj_tile[query_index - query_begin];
+
+      rmsnorm_token(input_token, input_layernorm_weight, rms_eps, input_norm_token);
+      project_tiled_token(
+          input_norm_token,
+          q_packed_weights,
+          q_bias,
+          q_scales,
+          kHiddenSize,
+          kHiddenSize,
+          tile_config.hidden_proj,
+          tile_config.hidden_proj,
+          q_proj_token);
+
+      for (int head_base = 0; head_base < kNumAttentionHeads; head_base += tile_config.query_heads_parallel) {
+        const int head_end = min_int(kNumAttentionHeads, head_base + tile_config.query_heads_parallel);
+        for (int head = head_base; head < head_end; ++head) {
+          apply_rope_inplace(q_proj_token + head * kHeadDim, query_index);
+        }
+      }
+    }
+
     prefill_attention_context_block(
-        g_q_proj_buffer,
+        q_proj_tile,
         k_cache,
         v_cache,
         seq_len,
         query_begin,
         query_end,
         tile_config,
-        g_context_buffer);
+        context_tile);
 
     for (int query_index = query_begin; query_index < query_end; ++query_index) {
-      const scalar_t* context_token = g_context_buffer[query_index - query_begin];
+      const scalar_t* context_token = context_tile[query_index - query_begin];
       scalar_t* output_token = output_sequence + query_index * kHiddenSize;
       project_tiled_token(
           context_token,
