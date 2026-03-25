@@ -551,10 +551,6 @@ void approx_sincos_fp(const catapult_fp_t& angle, catapult_fp_t* sin_value, cata
 
 catapult_fp_t reduce_sum_128_fp(catapult_fp_t values[kParallelMacLaneCount]);
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 catapult_fp_t rmsnorm_square_sum_fp(
     const catapult_fp_t input[llm_accel::kHiddenSize]) {
   catapult_fp_t square_sum = fp_zero();
@@ -709,10 +705,6 @@ catapult_fp_t reduce_sum_128_fp(catapult_fp_t values[kParallelMacLaneCount]) {
   return fp_add_op(stage2[0], stage2[1]);
 }
 
-#ifndef QWEN_CATAPULT_CONTEXT_ONLY
-#pragma hls_design ccore
-#pragma hls_ccore_type sequential
-#endif
 void rmsnorm_square_chunk_fp(
     const catapult_fp_t input[llm_accel::kHiddenSize],
     int base_index,
