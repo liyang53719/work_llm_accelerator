@@ -17,13 +17,25 @@ for path in (VERIFICATION_DIR, PYTHON_DIR):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
-from layer_descriptor_builder import build_layer_parameter_layout, load_qwen_model_spec  # type: ignore
+from layer_descriptor_builder import build_layer_parameter_layout  # type: ignore
+from qwen_model_spec import QwenModelSpec  # type: ignore
 
 
 DEFAULT_LIB_PATH = ROOT / "tmp" / "host_libs" / "libqwen_decode_stub.so"
 HIDDEN_SIZE = 1536
 KV_WIDTH = 256
 INTERMEDIATE_SIZE = 8960
+
+LOCAL_QWEN_SPEC = QwenModelSpec(
+    hidden_size=HIDDEN_SIZE,
+    intermediate_size=INTERMEDIATE_SIZE,
+    num_hidden_layers=28,
+    num_attention_heads=12,
+    num_key_value_heads=2,
+    vocab_size=151936,
+    rms_norm_eps=1.0e-6,
+    max_position_embeddings=32768,
+)
 
 
 def build_history_case() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -58,8 +70,7 @@ def main() -> None:
     parser.add_argument("--atol", type=float, default=1e-5)
     args = parser.parse_args()
 
-    spec = load_qwen_model_spec()
-    layout = build_layer_parameter_layout(spec)
+    layout = build_layer_parameter_layout(LOCAL_QWEN_SPEC)
 
     input_token, direct_k_cache, direct_v_cache = build_history_case()
     input_layernorm_weight = np.ones(HIDDEN_SIZE, dtype=np.float32)
