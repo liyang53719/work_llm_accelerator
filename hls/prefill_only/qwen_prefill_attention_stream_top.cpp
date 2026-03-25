@@ -134,36 +134,31 @@ KernelStatus qwen_prefill_attention_stream_top_catapult(
 
   prefill_catapult_fp_t input_sequence[kPrefillCatapultSeqCapacity * kHiddenSize];
   prefill_catapult_fp_t input_layernorm_weight[kHiddenSize];
-  packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2];
   packed_w4_t k_packed_weights[kPrefillCatapultKvWidth * kHiddenSize / 2];
   packed_w4_t v_packed_weights[kPrefillCatapultKvWidth * kHiddenSize / 2];
-  packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2];
-  prefill_catapult_fp_t q_bias[kHiddenSize];
   prefill_catapult_fp_t k_bias[kPrefillCatapultKvWidth];
   prefill_catapult_fp_t v_bias[kPrefillCatapultKvWidth];
-  prefill_catapult_fp_t q_scales[kHiddenSize];
   prefill_catapult_fp_t k_scales[kPrefillCatapultKvWidth];
   prefill_catapult_fp_t v_scales[kPrefillCatapultKvWidth];
-  prefill_catapult_fp_t o_scales[kHiddenSize];
   prefill_catapult_fp_t k_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth];
   prefill_catapult_fp_t v_cache[kPrefillCatapultSeqCapacity * kPrefillCatapultKvWidth];
 #ifndef __SYNTHESIS__
+  packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2];
+  packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2];
+  prefill_catapult_fp_t q_bias[kHiddenSize];
+  prefill_catapult_fp_t q_scales[kHiddenSize];
+  prefill_catapult_fp_t o_scales[kHiddenSize];
   prefill_catapult_fp_t output_sequence[kPrefillCatapultSeqCapacity * kHiddenSize];
 #endif
 
   read_fp_words(input_sequence_chan, input_sequence, seq_len * kHiddenSize);
   read_fp_words(input_layernorm_weight_chan, input_layernorm_weight, kHiddenSize);
-  read_packed_words(q_packed_weight_chan, q_packed_weights, kHiddenSize * kHiddenSize / 2);
   read_packed_words(k_packed_weight_chan, k_packed_weights, kPrefillCatapultKvWidth * kHiddenSize / 2);
   read_packed_words(v_packed_weight_chan, v_packed_weights, kPrefillCatapultKvWidth * kHiddenSize / 2);
-  read_packed_words(o_packed_weight_chan, o_packed_weights, kHiddenSize * kHiddenSize / 2);
-  read_fp_words(q_bias_chan, q_bias, kHiddenSize);
   read_fp_words(k_bias_chan, k_bias, kPrefillCatapultKvWidth);
   read_fp_words(v_bias_chan, v_bias, kPrefillCatapultKvWidth);
-  read_fp_words(q_scale_chan, q_scales, kHiddenSize);
   read_fp_words(k_scale_chan, k_scales, kPrefillCatapultKvWidth);
   read_fp_words(v_scale_chan, v_scales, kPrefillCatapultKvWidth);
-  read_fp_words(o_scale_chan, o_scales, kHiddenSize);
 
 #ifdef __SYNTHESIS__
   qwen_prefill_attention_kv_cache_stage_catapult(
@@ -180,6 +175,18 @@ KernelStatus qwen_prefill_attention_stream_top_catapult(
       {v_scales},
       {k_cache},
       {v_cache});
+
+      packed_w4_t q_packed_weights[kHiddenSize * kHiddenSize / 2];
+      packed_w4_t o_packed_weights[kHiddenSize * kHiddenSize / 2];
+      prefill_catapult_fp_t q_bias[kHiddenSize];
+      prefill_catapult_fp_t q_scales[kHiddenSize];
+      prefill_catapult_fp_t o_scales[kHiddenSize];
+
+      read_packed_words(q_packed_weight_chan, q_packed_weights, kHiddenSize * kHiddenSize / 2);
+      read_packed_words(o_packed_weight_chan, o_packed_weights, kHiddenSize * kHiddenSize / 2);
+      read_fp_words(q_bias_chan, q_bias, kHiddenSize);
+      read_fp_words(q_scale_chan, q_scales, kHiddenSize);
+      read_fp_words(o_scale_chan, o_scales, kHiddenSize);
 
   qwen_prefill_attention_q_context_output_stream_stage_catapult(
       input_sequence,
@@ -200,6 +207,12 @@ KernelStatus qwen_prefill_attention_stream_top_catapult(
   write_fp_words(v_cache, seq_len * kPrefillCatapultKvWidth, v_cache_out_chan);
   return {true, 0};
 #else
+  read_packed_words(q_packed_weight_chan, q_packed_weights, kHiddenSize * kHiddenSize / 2);
+  read_packed_words(o_packed_weight_chan, o_packed_weights, kHiddenSize * kHiddenSize / 2);
+  read_fp_words(q_bias_chan, q_bias, kHiddenSize);
+  read_fp_words(q_scale_chan, q_scales, kHiddenSize);
+  read_fp_words(o_scale_chan, o_scales, kHiddenSize);
+
   const KernelStatus status = qwen_prefill_attention_kernel_catapult(
       {input_sequence},
       seq_len,
